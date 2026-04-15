@@ -48,26 +48,55 @@ func New() *Composer {
 }
 
 func (c *Composer) LoadFiles(files []string) error {
-	for _, path := range files {
-		config, err := clientcmd.LoadFromFile(path)
-		if err != nil {
-			return fmt.Errorf("failed to load %s: %w", path, err)
-		}
-
-		absPath, _ := filepath.Abs(path)
-		source := getFileBaseName(path)
-		c.configs = append(c.configs, configWithSource{
-			config:   config,
-			source:   source,
-			fullPath: absPath,
-		})
-		fmt.Printf("Loaded kubeconfig: %s\n", path)
+	type loadResult struct {
+		config configWithSource
+		err    error
+		path   string
 	}
+
+	resultChan := make(chan loadResult, len(files))
+
+	// Загружаем файлы параллельно
+	for _, path := range files {
+		go func(p string) {
+			config, err := clientcmd.LoadFromFile(p)
+			if err != nil {
+				resultChan <- loadResult{err: err, path: p}
+				return
+			}
+
+			absPath, _ := filepath.Abs(p)
+			source := getFileBaseName(p)
+			resultChan <- loadResult{
+				config: configWithSource{
+					config:   config,
+					source:   source,
+					fullPath: absPath,
+				},
+				path: p,
+			}
+		}(path)
+	}
+
+	// Собираем результаты
+	for i := 0; i < len(files); i++ {
+		result := <-resultChan
+		if result.err != nil {
+			return fmt.Errorf("failed to load %s: %w", result.path, result.err)
+		}
+		c.configs = append(c.configs, result.config)
+		fmt.Printf("Loaded kubeconfig: %s\n", result.path)
+	}
+	close(resultChan)
+
 	return nil
 }
 
 func (c *Composer) ScanDirectory(dir string) error {
-	return filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	var kubeconfigPaths []string
+
+	// Сначала собираем все пути к файлам
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -80,22 +109,61 @@ func (c *Composer) ScanDirectory(dir string) error {
 			return nil
 		}
 
-		config, err := clientcmd.LoadFromFile(path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to load %s: %v\n", path, err)
-			return nil
-		}
-
-		absPath, _ := filepath.Abs(path)
-		source := getFileBaseName(path)
-		c.configs = append(c.configs, configWithSource{
-			config:   config,
-			source:   source,
-			fullPath: absPath,
-		})
-		fmt.Printf("Found kubeconfig: %s\n", path)
+		kubeconfigPaths = append(kubeconfigPaths, path)
 		return nil
 	})
+
+	if err != nil {
+		return err
+	}
+
+	if len(kubeconfigPaths) == 0 {
+		return nil
+	}
+
+	// Загружаем файлы параллельно
+	type loadResult struct {
+		config configWithSource
+		err    error
+		path   string
+	}
+
+	resultChan := make(chan loadResult, len(kubeconfigPaths))
+
+	for _, path := range kubeconfigPaths {
+		go func(p string) {
+			config, err := clientcmd.LoadFromFile(p)
+			if err != nil {
+				resultChan <- loadResult{err: err, path: p}
+				return
+			}
+
+			absPath, _ := filepath.Abs(p)
+			source := getFileBaseName(p)
+			resultChan <- loadResult{
+				config: configWithSource{
+					config:   config,
+					source:   source,
+					fullPath: absPath,
+				},
+				path: p,
+			}
+		}(path)
+	}
+
+	// Собираем результаты
+	for i := 0; i < len(kubeconfigPaths); i++ {
+		result := <-resultChan
+		if result.err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to load %s: %v\n", result.path, result.err)
+			continue
+		}
+		c.configs = append(c.configs, result.config)
+		fmt.Printf("Found kubeconfig: %s\n", result.path)
+	}
+	close(resultChan)
+
+	return nil
 }
 
 func (c *Composer) Merge() error {

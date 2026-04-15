@@ -86,6 +86,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	allStatuses := make([]clusterStatus, 0)
+	statusChan := make(chan clusterStatus, 100)
+	semaphore := make(chan struct{}, 20) // Ограничение на 20 одновременных проверок
+	totalContexts := 0
 
 	// Проверяем каждый файл
 	for _, kubeconfigPath := range kubeconfigFiles {
@@ -100,21 +103,33 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
+		totalContexts += len(config.Contexts)
+
 		if statusAll {
 			fmt.Printf("Проверка %s (%d контекстов)...\n", kubeconfigPath, len(config.Contexts))
 		} else {
 			fmt.Printf("Проверка подключения к %d кластерам (таймаут: %ds)...\n\n", len(config.Contexts), statusTimeout)
 		}
 
-		// Собираем статусы
+		// Запускаем параллельные проверки для всех контекстов
 		for contextName, contextInfo := range config.Contexts {
-			status := checkClusterStatus(kubeconfigPath, contextName, contextInfo.Cluster)
-			if statusAll {
-				status.Context = fmt.Sprintf("%s (%s)", contextName, filepath.Base(kubeconfigPath))
-			}
-			allStatuses = append(allStatuses, status)
+			semaphore <- struct{}{} // Захватываем слот
+			go func(kPath, cName, cInfo string) {
+				defer func() { <-semaphore }() // Освобождаем слот
+				status := checkClusterStatus(kPath, cName, cInfo)
+				if statusAll {
+					status.Context = fmt.Sprintf("%s (%s)", cName, filepath.Base(kPath))
+				}
+				statusChan <- status
+			}(kubeconfigPath, contextName, contextInfo.Cluster)
 		}
 	}
+
+	// Собираем результаты
+	for i := 0; i < totalContexts; i++ {
+		allStatuses = append(allStatuses, <-statusChan)
+	}
+	close(statusChan)
 
 	if len(allStatuses) == 0 {
 		fmt.Println("Контексты не найдены")

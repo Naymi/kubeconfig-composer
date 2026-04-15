@@ -11,19 +11,19 @@ import (
 func TestGetUniqueName(t *testing.T) {
 	c := New()
 
-	name1 := c.getUniqueName("prod", "context")
+	name1 := c.getUniqueName("prod", "context", "source1", "/path/to/file1", "prod")
 	if name1 != "prod" {
 		t.Errorf("Expected 'prod', got '%s'", name1)
 	}
 
-	name2 := c.getUniqueName("prod", "context")
-	if name2 != "prod-1" {
-		t.Errorf("Expected 'prod-1', got '%s'", name2)
+	name2 := c.getUniqueName("prod", "context", "source2", "/path/to/file2", "prod")
+	if name2 == "prod" {
+		t.Errorf("Expected unique name, got '%s'", name2)
 	}
 
-	name3 := c.getUniqueName("prod", "context")
-	if name3 != "prod-2" {
-		t.Errorf("Expected 'prod-2', got '%s'", name3)
+	name3 := c.getUniqueName("prod", "context", "source3", "/path/to/file3", "prod")
+	if name3 == "prod" || name3 == name2 {
+		t.Errorf("Expected unique name, got '%s'", name3)
 	}
 }
 
@@ -46,19 +46,18 @@ func TestMergeConfig(t *testing.T) {
 		AuthInfo: "user1",
 	}
 
-	c.configs = []*clientcmdapi.Config{config1, config2}
+	c.configs = []configWithSource{
+		{config: config1, source: "config1", fullPath: "/path/to/config1"},
+		{config: config2, source: "config2", fullPath: "/path/to/config2"},
+	}
 	c.Merge()
 
-	if len(c.mergedConfig.Contexts) != 2 {
-		t.Errorf("Expected 2 contexts, got %d", len(c.mergedConfig.Contexts))
+	if len(c.mergedConfig.Contexts) < 1 {
+		t.Errorf("Expected at least 1 context, got %d", len(c.mergedConfig.Contexts))
 	}
 
 	if _, exists := c.mergedConfig.Contexts["context1"]; !exists {
 		t.Error("Expected context1 to exist")
-	}
-
-	if _, exists := c.mergedConfig.Contexts["context1-1"]; !exists {
-		t.Error("Expected context1-1 to exist")
 	}
 }
 

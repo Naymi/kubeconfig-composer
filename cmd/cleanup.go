@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 var (
@@ -84,55 +85,89 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	}
 
 	results := make([]cleanupResult, 0)
+	resultChan := make(chan cleanupResult, len(kubeconfigFiles))
+	semaphore := make(chan struct{}, 20) // Ограничение на 20 одновременных проверок
 
-	// Анализируем каждый файл
+	// Анализируем каждый файл параллельно
 	for _, kubeconfigPath := range kubeconfigFiles {
-		config, err := clientcmd.LoadFromFile(kubeconfigPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "⚠️  Не удалось загрузить %s: %v\n", kubeconfigPath, err)
-			continue
-		}
-
-		if len(config.Contexts) == 0 {
-			continue
-		}
-
-		fmt.Printf("Проверка %s (%d контекстов)...\n", kubeconfigPath, len(config.Contexts))
-
-		result := cleanupResult{
-			filePath:           kubeconfigPath,
-			totalContexts:      len(config.Contexts),
-			unavailableContexts: make([]string, 0),
-			availableContexts:   make([]string, 0),
-		}
-
-		// Проверяем доступность каждого контекста
-		for contextName, contextInfo := range config.Contexts {
-			status := checkClusterStatus(kubeconfigPath, contextName, contextInfo.Cluster)
-			if status.Status == "✓" || status.Status == "⚠" {
-				result.availableContexts = append(result.availableContexts, contextName)
-			} else {
-				result.unavailableContexts = append(result.unavailableContexts, contextName)
+		go func(kPath string) {
+			config, err := clientcmd.LoadFromFile(kPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "⚠️  Не удалось загрузить %s: %v\n", kPath, err)
+				resultChan <- cleanupResult{}
+				return
 			}
-		}
 
-		// Если все контексты недоступны, помечаем файл для удаления
-		// Но не удаляем ~/.kube/config - только очищаем его
-		defaultConfig := filepath.Join(os.Getenv("HOME"), ".kube", "config")
-		if len(result.availableContexts) == 0 {
-			absPath, _ := filepath.Abs(kubeconfigPath)
-			absDefault, _ := filepath.Abs(defaultConfig)
-			if absPath == absDefault {
-				result.shouldDeleteFile = false
-			} else {
-				result.shouldDeleteFile = true
+			if len(config.Contexts) == 0 {
+				resultChan <- cleanupResult{}
+				return
 			}
-		}
 
+			fmt.Printf("Проверка %s (%d контекстов)...\n", kPath, len(config.Contexts))
+
+			result := cleanupResult{
+				filePath:           kPath,
+				totalContexts:      len(config.Contexts),
+				unavailableContexts: make([]string, 0),
+				availableContexts:   make([]string, 0),
+			}
+
+			// Канал для параллельной проверки контекстов внутри файла
+			type contextCheck struct {
+				name      string
+				available bool
+			}
+			checkChan := make(chan contextCheck, len(config.Contexts))
+
+			// Проверяем доступность каждого контекста параллельно
+			for contextName, contextInfo := range config.Contexts {
+				semaphore <- struct{}{} // Захватываем слот
+				go func(cName string, cInfo *clientcmdapi.Context) {
+					defer func() { <-semaphore }() // Освобождаем слот
+					status := checkClusterStatus(kPath, cName, cInfo.Cluster)
+					checkChan <- contextCheck{
+						name:      cName,
+						available: status.Status == "✓" || status.Status == "⚠",
+					}
+				}(contextName, contextInfo)
+			}
+
+			// Собираем результаты проверок контекстов
+			for i := 0; i < len(config.Contexts); i++ {
+				check := <-checkChan
+				if check.available {
+					result.availableContexts = append(result.availableContexts, check.name)
+				} else {
+					result.unavailableContexts = append(result.unavailableContexts, check.name)
+				}
+			}
+			close(checkChan)
+
+			// Если все контексты недоступны, помечаем файл для удаления
+			// Но не удаляем ~/.kube/config - только очищаем его
+			defaultConfig := filepath.Join(os.Getenv("HOME"), ".kube", "config")
+			if len(result.availableContexts) == 0 {
+				absPath, _ := filepath.Abs(kPath)
+				absDefault, _ := filepath.Abs(defaultConfig)
+				if absPath == absDefault {
+					result.shouldDeleteFile = false
+				} else {
+					result.shouldDeleteFile = true
+				}
+			}
+
+			resultChan <- result
+		}(kubeconfigPath)
+	}
+
+	// Собираем результаты по всем файлам
+	for i := 0; i < len(kubeconfigFiles); i++ {
+		result := <-resultChan
 		if len(result.unavailableContexts) > 0 {
 			results = append(results, result)
 		}
 	}
+	close(resultChan)
 
 	if len(results) == 0 {
 		fmt.Println("\n✓ Все контексты доступны, очистка не требуется")
