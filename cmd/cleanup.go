@@ -7,9 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/naymi/kubeconfig-composer/pkg/checker"
+	"github.com/naymi/kubeconfig-composer/pkg/cleaner"
+	"github.com/naymi/kubeconfig-composer/pkg/scanner"
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/tools/clientcmd"
-	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 var (
@@ -70,7 +72,7 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 
 	if cleanupAll {
 		fmt.Printf("Сканирование директории %s...\n", cleanupDir)
-		files, err := findKubeconfigFiles(cleanupDir)
+		files, err := scanner.FindKubeconfigFiles(cleanupDir)
 		if err != nil {
 			return fmt.Errorf("не удалось просканировать директорию: %w", err)
 		}
@@ -122,14 +124,14 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 			// Проверяем доступность каждого контекста параллельно
 			for contextName, contextInfo := range config.Contexts {
 				semaphore <- struct{}{} // Захватываем слот
-				go func(cName string, cInfo *clientcmdapi.Context) {
+				go func(cName string, clusterName string) {
 					defer func() { <-semaphore }() // Освобождаем слот
-					status := checkClusterStatus(kPath, cName, cInfo.Cluster)
+					status := checker.CheckClusterStatus(kPath, cName, clusterName, cleanupTimeout)
 					checkChan <- contextCheck{
 						name:      cName,
 						available: status.Status == "✓" || status.Status == "⚠",
 					}
-				}(contextName, contextInfo)
+				}(contextName, contextInfo.Cluster)
 			}
 
 			// Собираем результаты проверок контекстов
@@ -250,7 +252,7 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 				fmt.Printf("✓ Удалён файл: %s\n", result.filePath)
 			}
 		} else {
-			if err := removeContextsFromFile(result.filePath, result.unavailableContexts); err != nil {
+			if err := cleaner.RemoveContextsFromFile(result.filePath, result.unavailableContexts); err != nil {
 				fmt.Fprintf(os.Stderr, "❌ Не удалось очистить %s: %v\n", result.filePath, err)
 			} else {
 				fmt.Printf("✓ Удалено %d контекстов из %s\n", len(result.unavailableContexts), result.filePath)
@@ -259,61 +261,5 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Println("\n✓ Очистка завершена")
-	return nil
-}
-
-func removeContextsFromFile(filePath string, contextsToRemove []string) error {
-	config, err := clientcmd.LoadFromFile(filePath)
-	if err != nil {
-		return fmt.Errorf("не удалось загрузить файл: %w", err)
-	}
-
-	removeSet := make(map[string]bool)
-	for _, ctx := range contextsToRemove {
-		removeSet[ctx] = true
-	}
-
-	// Удаляем контексты
-	for contextName := range config.Contexts {
-		if removeSet[contextName] {
-			delete(config.Contexts, contextName)
-		}
-	}
-
-	// Удаляем неиспользуемые кластеры и пользователей
-	usedClusters := make(map[string]bool)
-	usedUsers := make(map[string]bool)
-	for _, context := range config.Contexts {
-		usedClusters[context.Cluster] = true
-		usedUsers[context.AuthInfo] = true
-	}
-
-	for clusterName := range config.Clusters {
-		if !usedClusters[clusterName] {
-			delete(config.Clusters, clusterName)
-		}
-	}
-
-	for userName := range config.AuthInfos {
-		if !usedUsers[userName] {
-			delete(config.AuthInfos, userName)
-		}
-	}
-
-	// Если текущий контекст был удалён, сбрасываем его
-	if removeSet[config.CurrentContext] {
-		config.CurrentContext = ""
-	}
-
-	// Сохраняем изменения
-	data, err := clientcmd.Write(*config)
-	if err != nil {
-		return fmt.Errorf("не удалось сериализовать конфигурацию: %w", err)
-	}
-
-	if err := os.WriteFile(filePath, data, 0600); err != nil {
-		return fmt.Errorf("не удалось записать файл: %w", err)
-	}
-
 	return nil
 }

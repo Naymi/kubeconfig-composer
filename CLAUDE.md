@@ -39,14 +39,31 @@ All commands are in `cmd/` directory:
 - `status.go` - Checks connectivity to clusters and displays status table
 - `cleanup.go` - Removes unreachable contexts and optionally deletes empty files
 
-### Core Logic
-`pkg/composer/composer.go` contains the main merging logic:
+### Core Packages
+
+#### `pkg/composer`
+Main merging logic:
 - `Composer` struct manages the merge state with conflict tracking maps
 - `ScanDirectory()` - Recursively finds kubeconfig files
 - `LoadFiles()` - Loads specific kubeconfig files
 - `Merge()` - Merges all loaded configs with conflict resolution
 - `getUniqueName()` - Handles name conflicts interactively, prompting user for custom names or auto-generating suffixes
-- `isKubeconfigFile()` - Identifies valid kubeconfig files by extension (.yaml, .yml), name (config, kubeconfig*), or content structure
+
+#### `pkg/scanner`
+File scanning utilities:
+- `IsKubeconfigFile()` - Identifies valid kubeconfig files by extension (.yaml, .yml), name (config, kubeconfig*), or content structure
+- `FindKubeconfigFiles()` - Scans directory and returns list of valid kubeconfig files
+
+#### `pkg/checker`
+Cluster connectivity checking:
+- `ClusterStatus` - Struct representing cluster connection status
+- `CheckClusterStatus()` - Verifies cluster accessibility and retrieves version info
+- `TruncateError()` - Formats error messages for display
+
+#### `pkg/cleaner`
+Kubeconfig cleanup utilities:
+- `RemoveContextsFromFile()` - Removes specified contexts and unused clusters/users
+- `WriteConfig()` - Safely writes kubeconfig to file with proper permissions
 
 ### Conflict Resolution Strategy
 When merging configs, the tool:
@@ -65,7 +82,7 @@ Uses `k8s.io/client-go` for:
 
 ## Testing
 
-Tests are located in `pkg/composer/composer_test.go`. When adding features to the composer package, add corresponding test cases.
+Tests are located in `pkg/composer/composer_test.go`. When adding features, add corresponding test cases in the appropriate package test file.
 
 ## Common Development Patterns
 
@@ -75,6 +92,7 @@ Tests are located in `pkg/composer/composer_test.go`. When adding features to th
 3. Add command to rootCmd in init() function
 4. Define flags using command.Flags()
 5. Implement the RunE function with error handling
+6. Use existing packages (`pkg/scanner`, `pkg/checker`, `pkg/cleaner`) for common operations
 
 ### Working with Kubeconfig Files
 - Always use `clientcmd.LoadFromFile()` to load configs

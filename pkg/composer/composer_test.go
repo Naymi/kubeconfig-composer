@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/naymi/kubeconfig-composer/pkg/scanner"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
@@ -120,7 +121,7 @@ func TestIsKubeconfigFile(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			result := isKubeconfigFile(path, info)
+			result := scanner.IsKubeconfigFile(path, info)
 			if result != tt.expected {
 				t.Errorf("Expected %v, got %v", tt.expected, result)
 			}

@@ -1,17 +1,14 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"text/tabwriter"
-	"time"
 
+	"github.com/naymi/kubeconfig-composer/pkg/checker"
+	"github.com/naymi/kubeconfig-composer/pkg/scanner"
 	"github.com/spf13/cobra"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
@@ -56,13 +53,6 @@ func init() {
 	statusCmd.Flags().StringVarP(&statusDir, "dir", "d", defaultDir, "Директория для поиска kubeconfig файлов (используется с --all)")
 }
 
-type clusterStatus struct {
-	Context string
-	Cluster string
-	Status  string
-	Version string
-	Error   string
-}
 
 func runStatus(cmd *cobra.Command, args []string) error {
 	var kubeconfigFiles []string
@@ -70,7 +60,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	if statusAll {
 		// Сканируем директорию для поиска всех kubeconfig файлов
 		fmt.Printf("Сканирование директории %s...\n", statusDir)
-		files, err := findKubeconfigFiles(statusDir)
+		files, err := scanner.FindKubeconfigFiles(statusDir)
 		if err != nil {
 			return fmt.Errorf("не удалось просканировать директорию: %w", err)
 		}
@@ -85,8 +75,8 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		kubeconfigFiles = []string{statusKubeconfig}
 	}
 
-	allStatuses := make([]clusterStatus, 0)
-	statusChan := make(chan clusterStatus, 100)
+	allStatuses := make([]checker.ClusterStatus, 0)
+	statusChan := make(chan checker.ClusterStatus, 100)
 	semaphore := make(chan struct{}, 20) // Ограничение на 20 одновременных проверок
 	totalContexts := 0
 
@@ -116,7 +106,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			semaphore <- struct{}{} // Захватываем слот
 			go func(kPath, cName, cInfo string) {
 				defer func() { <-semaphore }() // Освобождаем слот
-				status := checkClusterStatus(kPath, cName, cInfo)
+				status := checker.CheckClusterStatus(kPath, cName, cInfo, statusTimeout)
 				if statusAll {
 					status.Context = fmt.Sprintf("%s (%s)", cName, filepath.Base(kPath))
 				}
@@ -159,121 +149,5 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("\nИтого: %d/%d кластеров доступны\n", successCount, len(allStatuses))
 	return nil
-}
-
-func checkClusterStatus(kubeconfigPath, contextName, clusterName string) clusterStatus {
-	status := clusterStatus{
-		Context: contextName,
-		Cluster: clusterName,
-		Status:  "✗",
-		Version: "-",
-		Error:   "",
-	}
-
-	// Создаём конфигурацию для конкретного контекста
-	loadingRules := &clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfigPath}
-	configOverrides := &clientcmd.ConfigOverrides{CurrentContext: contextName}
-	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
-
-	restConfig, err := kubeConfig.ClientConfig()
-	if err != nil {
-		status.Error = truncateError(err.Error())
-		return status
-	}
-
-	// Устанавливаем таймаут
-	restConfig.Timeout = time.Duration(statusTimeout) * time.Second
-
-	// Создаём клиент
-	clientset, err := kubernetes.NewForConfig(restConfig)
-	if err != nil {
-		status.Error = truncateError(err.Error())
-		return status
-	}
-
-	// Пробуем получить версию сервера
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(statusTimeout)*time.Second)
-	defer cancel()
-
-	versionInfo, err := clientset.Discovery().ServerVersion()
-	if err != nil {
-		status.Error = truncateError(err.Error())
-		return status
-	}
-
-	// Проверяем, что можем получить список нод (базовая проверка доступа)
-	_, err = clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{Limit: 1})
-	if err != nil {
-		// Если не можем получить ноды, но версия получена - всё равно считаем успехом
-		// (может быть ограничение прав доступа)
-		status.Status = "⚠"
-		status.Version = versionInfo.GitVersion
-		status.Error = "ограниченный доступ"
-		return status
-	}
-
-	status.Status = "✓"
-	status.Version = versionInfo.GitVersion
-	return status
-}
-
-func truncateError(err string) string {
-	// Убираем лишние детали из ошибки
-	err = strings.ReplaceAll(err, "\n", " ")
-
-	// Извлекаем основную причину
-	if idx := strings.Index(err, "connection refused"); idx != -1 {
-		return "connection refused"
-	}
-	if idx := strings.Index(err, "timeout"); idx != -1 {
-		return "timeout"
-	}
-	if idx := strings.Index(err, "no such host"); idx != -1 {
-		return "no such host"
-	}
-	if idx := strings.Index(err, "certificate"); idx != -1 {
-		return "certificate error"
-	}
-	if idx := strings.Index(err, "unauthorized"); idx != -1 {
-		return "unauthorized"
-	}
-	if idx := strings.Index(err, "forbidden"); idx != -1 {
-		return "forbidden"
-	}
-
-	// Обрезаем длинные ошибки
-	if len(err) > 50 {
-		return err[:47] + "..."
-	}
-	return err
-}
-
-func findKubeconfigFiles(dir string) ([]string, error) {
-	var files []string
-
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if info.IsDir() {
-			return nil
-		}
-
-		if !isKubeconfigFile(path, info) {
-			return nil
-		}
-
-		// Проверяем, что файл можно загрузить как kubeconfig
-		_, err = clientcmd.LoadFromFile(path)
-		if err != nil {
-			return nil
-		}
-
-		files = append(files, path)
-		return nil
-	})
-
-	return files, err
 }
 

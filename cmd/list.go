@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/naymi/kubeconfig-composer/pkg/scanner"
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -43,7 +44,7 @@ func runList(cmd *cobra.Command, args []string) error {
 			return nil
 		}
 
-		if !isKubeconfigFile(path, info) {
+		if !scanner.IsKubeconfigFile(path, info) {
 			return nil
 		}
 
@@ -84,22 +85,4 @@ func getContextNames(contexts map[string]*clientcmdapi.Context) []string {
 		names = append(names, name)
 	}
 	return names
-}
-
-func isKubeconfigFile(path string, info os.FileInfo) bool {
-	name := info.Name()
-
-	if strings.HasPrefix(name, ".") {
-		return false
-	}
-
-	if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") {
-		return true
-	}
-
-	if name == "config" || strings.HasPrefix(name, "kubeconfig") {
-		return true
-	}
-
-	return false
 }
