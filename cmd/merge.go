@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/naymi/kubeconfig-composer/pkg/composer"
+	"github.com/pterm/pterm"
 	"github.com/spf13/cobra"
 )
 
@@ -46,28 +47,35 @@ func init() {
 func runMerge(cmd *cobra.Command, args []string) error {
 	c := composer.New()
 
+	// Шаг 1: Загрузка файлов
 	if files != "" {
 		filePaths := strings.Split(files, ",")
 		for i, path := range filePaths {
 			filePaths[i] = strings.TrimSpace(path)
 		}
+		fmt.Printf("Загрузка %d файлов...\n", len(filePaths))
 		if err := c.LoadFiles(filePaths); err != nil {
 			return fmt.Errorf("не удалось загрузить файлы: %w", err)
 		}
 	} else {
+		fmt.Printf("Сканирование %s...\n", kubeDir)
 		if err := c.ScanDirectory(kubeDir); err != nil {
 			return fmt.Errorf("не удалось просканировать директорию: %w", err)
 		}
+		fmt.Printf("Найдено %d файлов\n", len(c.GetLoadedFiles()))
 	}
 
+	// Шаг 2: Объединение конфигураций
+	fmt.Println("Объединение...")
 	if err := c.Merge(); err != nil {
 		return fmt.Errorf("не удалось объединить конфигурации: %w", err)
 	}
 
+	// Шаг 3: Запись результата
 	if err := c.WriteOutput(output); err != nil {
 		return fmt.Errorf("не удалось записать результат: %w", err)
 	}
 
-	fmt.Printf("✓ Успешно объединены kubeconfig файлы в %s\n", output)
+	pterm.FgGreen.Printf("✓ Готово: %s\n", output)
 	return nil
 }

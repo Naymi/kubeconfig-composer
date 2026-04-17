@@ -1,13 +1,13 @@
 package composer
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/naymi/kubeconfig-composer/pkg/scanner"
+	"github.com/pterm/pterm"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
@@ -85,7 +85,6 @@ func (c *Composer) LoadFiles(files []string) error {
 			return fmt.Errorf("failed to load %s: %w", result.path, result.err)
 		}
 		c.configs = append(c.configs, result.config)
-		fmt.Printf("Loaded kubeconfig: %s\n", result.path)
 	}
 	close(resultChan)
 
@@ -155,11 +154,10 @@ func (c *Composer) ScanDirectory(dir string) error {
 	for i := 0; i < len(kubeconfigPaths); i++ {
 		result := <-resultChan
 		if result.err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to load %s: %v\n", result.path, result.err)
+			pterm.FgYellow.Printf("⚠ Не удалось загрузить %s: %v\n", result.path, result.err)
 			continue
 		}
 		c.configs = append(c.configs, result.config)
-		fmt.Printf("Found kubeconfig: %s\n", result.path)
 	}
 	close(resultChan)
 
@@ -253,15 +251,23 @@ func (c *Composer) getUniqueName(name, prefix, source, fullPath, originalItemNam
 	// Формируем предложение на основе имени файла
 	suggestedName := fmt.Sprintf("%s-%s", originalItemName, source)
 
-	fmt.Printf("\n⚠️  Конфликт имени '%s' для %s (попытка #%d)\n", name, prefix, counts[name])
-	fmt.Printf("  Первый:  %s '%s' из %s\n", firstSource.itemType, firstSource.itemName, firstSource.filePath)
-	fmt.Printf("  Текущий: %s '%s' из %s\n", prefix, originalName, fullPath)
-	fmt.Printf("Введите новое имя для %s (или нажмите Enter для автоматического: %s): ", prefix, suggestedName)
+	fmt.Println()
+	pterm.FgYellow.Printf("⚠ Конфликт '%s' для %s\n", name, prefix)
+	pterm.DefaultBasicText.Printf("  Первый:  %s из %s\n", firstSource.itemName, firstSource.filePath)
+	pterm.DefaultBasicText.Printf("  Текущий: %s из %s\n", originalName, fullPath)
+	fmt.Printf("Новое имя [%s]: ", suggestedName)
 
-	reader := bufio.NewReader(os.Stdin)
-	input, err := reader.ReadString('\n')
-	if err != nil || strings.TrimSpace(input) == "" {
-		// Проверяем, не занято ли предложенное имя
+	var customName string
+	fmt.Scanln(&customName)
+	customName = strings.TrimSpace(customName)
+
+	if customName == "" {
+		customName = suggestedName
+	}
+
+	// Проверяем, не занято ли введённое имя
+	if _, exists := counts[customName]; exists {
+		pterm.FgYellow.Printf("⚠ Имя '%s' занято, используем: %s\n", customName, suggestedName)
 		if _, exists := counts[suggestedName]; !exists {
 			counts[suggestedName] = 0
 			sources[suggestedName] = nameSource{
@@ -269,18 +275,6 @@ func (c *Composer) getUniqueName(name, prefix, source, fullPath, originalItemNam
 				itemType: prefix,
 				itemName: originalName,
 			}
-			return suggestedName
-		}
-		// Если занято, используем старый вариант с номером
-		return fmt.Sprintf("%s-%d", name, counts[name])
-	}
-
-	customName := strings.TrimSpace(input)
-
-	// Проверяем, не занято ли введённое имя
-	if _, exists := counts[customName]; exists {
-		fmt.Printf("⚠️  Имя '%s' уже используется, применяем автоматическое имя\n", customName)
-		if _, exists := counts[suggestedName]; !exists {
 			return suggestedName
 		}
 		return fmt.Sprintf("%s-%d", name, counts[name])
@@ -306,6 +300,10 @@ func (c *Composer) WriteOutput(path string) error {
 	}
 
 	return nil
+}
+
+func (c *Composer) GetLoadedFiles() []configWithSource {
+	return c.configs
 }
 
 func getFileBaseName(path string) string {

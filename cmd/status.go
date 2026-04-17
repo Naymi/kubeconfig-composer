@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"text/tabwriter"
 
 	"github.com/naymi/kubeconfig-composer/pkg/checker"
 	"github.com/naymi/kubeconfig-composer/pkg/scanner"
+	"github.com/pterm/pterm"
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -59,7 +59,6 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	if statusAll {
 		// Сканируем директорию для поиска всех kubeconfig файлов
-		fmt.Printf("Сканирование директории %s...\n", statusDir)
 		files, err := scanner.FindKubeconfigFiles(statusDir)
 		if err != nil {
 			return fmt.Errorf("не удалось просканировать директорию: %w", err)
@@ -69,7 +68,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			return nil
 		}
 		kubeconfigFiles = files
-		fmt.Printf("Найдено %d kubeconfig файлов\n\n", len(files))
+		fmt.Printf("Найдено %d файлов\n", len(files))
 	} else {
 		// Проверяем один файл
 		kubeconfigFiles = []string{statusKubeconfig}
@@ -80,25 +79,33 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	semaphore := make(chan struct{}, 20) // Ограничение на 20 одновременных проверок
 	totalContexts := 0
 
+	// Подсчитываем общее количество контекстов
+	for _, kubeconfigPath := range kubeconfigFiles {
+		config, err := clientcmd.LoadFromFile(kubeconfigPath)
+		if err != nil {
+			pterm.Warning.Printf("Не удалось загрузить %s: %v\n", kubeconfigPath, err)
+			continue
+		}
+		totalContexts += len(config.Contexts)
+	}
+
+	if totalContexts == 0 {
+		fmt.Println("Контексты не найдены")
+		return nil
+	}
+
+	fmt.Printf("Проверка %d контекстов...\n", totalContexts)
+
 	// Проверяем каждый файл
 	for _, kubeconfigPath := range kubeconfigFiles {
 		// Загружаем kubeconfig
 		config, err := clientcmd.LoadFromFile(kubeconfigPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "⚠️  Не удалось загрузить %s: %v\n", kubeconfigPath, err)
 			continue
 		}
 
 		if len(config.Contexts) == 0 {
 			continue
-		}
-
-		totalContexts += len(config.Contexts)
-
-		if statusAll {
-			fmt.Printf("Проверка %s (%d контекстов)...\n", kubeconfigPath, len(config.Contexts))
-		} else {
-			fmt.Printf("Проверка подключения к %d кластерам (таймаут: %ds)...\n\n", len(config.Contexts), statusTimeout)
 		}
 
 		// Запускаем параллельные проверки для всех контекстов
@@ -128,26 +135,35 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	// Выводим таблицу
 	fmt.Println()
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "КОНТЕКСТ\tКЛАСТЕР\tСТАТУС\tВЕРСИЯ\tОШИБКА")
-	fmt.Fprintln(w, "--------\t-------\t------\t------\t------")
+	tableData := pterm.TableData{
+		{"КОНТЕКСТ", "КЛАСТЕР", "СТАТУС", "ВЕРСИЯ", "ОШИБКА"},
+	}
 
 	successCount := 0
 	for _, s := range allStatuses {
 		if s.Status == "✓" {
 			successCount++
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+		tableData = append(tableData, []string{
 			s.Context,
 			s.Cluster,
 			s.Status,
 			s.Version,
 			s.Error,
-		)
+		})
 	}
-	w.Flush()
 
-	fmt.Printf("\nИтого: %d/%d кластеров доступны\n", successCount, len(allStatuses))
+	pterm.DefaultTable.WithHasHeader().WithData(tableData).Render()
+
+	// Итоговая статистика с цветом
+	fmt.Println()
+	if successCount == len(allStatuses) {
+		pterm.FgGreen.Printf("%d/%d доступны\n", successCount, len(allStatuses))
+	} else if successCount == 0 {
+		pterm.FgRed.Printf("%d/%d доступны\n", successCount, len(allStatuses))
+	} else {
+		pterm.FgYellow.Printf("%d/%d доступны\n", successCount, len(allStatuses))
+	}
 	return nil
 }
 

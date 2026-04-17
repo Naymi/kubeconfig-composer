@@ -1,15 +1,14 @@
 package cmd
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/naymi/kubeconfig-composer/pkg/checker"
 	"github.com/naymi/kubeconfig-composer/pkg/cleaner"
 	"github.com/naymi/kubeconfig-composer/pkg/scanner"
+	"github.com/pterm/pterm"
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -71,7 +70,6 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	var kubeconfigFiles []string
 
 	if cleanupAll {
-		fmt.Printf("Сканирование директории %s...\n", cleanupDir)
 		files, err := scanner.FindKubeconfigFiles(cleanupDir)
 		if err != nil {
 			return fmt.Errorf("не удалось просканировать директорию: %w", err)
@@ -81,7 +79,7 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 			return nil
 		}
 		kubeconfigFiles = files
-		fmt.Printf("Найдено %d kubeconfig файлов\n\n", len(files))
+		fmt.Printf("Найдено %d файлов\n", len(files))
 	} else {
 		kubeconfigFiles = []string{cleanupKubeconfig}
 	}
@@ -90,12 +88,24 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	resultChan := make(chan cleanupResult, len(kubeconfigFiles))
 	semaphore := make(chan struct{}, 20) // Ограничение на 20 одновременных проверок
 
+	// Подсчитываем общее количество контекстов
+	totalContexts := 0
+	for _, kubeconfigPath := range kubeconfigFiles {
+		config, err := clientcmd.LoadFromFile(kubeconfigPath)
+		if err != nil {
+			continue
+		}
+		totalContexts += len(config.Contexts)
+	}
+
+	fmt.Printf("Анализ %d контекстов...\n", totalContexts)
+
 	// Анализируем каждый файл параллельно
 	for _, kubeconfigPath := range kubeconfigFiles {
 		go func(kPath string) {
 			config, err := clientcmd.LoadFromFile(kPath)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "⚠️  Не удалось загрузить %s: %v\n", kPath, err)
+				fmt.Fprintf(os.Stderr, "⚠ Не удалось загрузить %s: %v\n", kPath, err)
 				resultChan <- cleanupResult{}
 				return
 			}
@@ -104,8 +114,6 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 				resultChan <- cleanupResult{}
 				return
 			}
-
-			fmt.Printf("Проверка %s (%d контекстов)...\n", kPath, len(config.Contexts))
 
 			result := cleanupResult{
 				filePath:           kPath,
@@ -172,14 +180,20 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	close(resultChan)
 
 	if len(results) == 0 {
-		fmt.Println("\n✓ Все контексты доступны, очистка не требуется")
+		fmt.Println("\n✓ Все контексты доступны")
 		return nil
 	}
 
 	// Показываем что будет удалено
-	fmt.Println("\n" + strings.Repeat("=", 70))
-	fmt.Println("Результаты анализа:")
-	fmt.Println(strings.Repeat("=", 70))
+	fmt.Println()
+
+	const (
+		red    = "\033[31m"
+		green  = "\033[32m"
+		yellow = "\033[33m"
+		cyan   = "\033[36m"
+		reset  = "\033[0m"
+	)
 
 	filesToDelete := 0
 	contextsToDelete := 0
@@ -193,73 +207,67 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 
 		if result.shouldDeleteFile {
 			filesToDelete++
-			fmt.Printf("\n❌ Файл будет удалён: %s\n", result.filePath)
-			fmt.Printf("   Причина: все %d контекстов недоступны\n", result.totalContexts)
+			fmt.Printf("%s✗ %s%s\n", red, result.filePath, reset)
 			for _, ctx := range result.unavailableContexts {
-				fmt.Printf("   - %s\n", ctx)
+				fmt.Printf("%s  ✗ %s%s\n", red, ctx, reset)
 			}
 		} else if len(result.unavailableContexts) == result.totalContexts && isDefaultConfig {
 			contextsToDelete += len(result.unavailableContexts)
-			fmt.Printf("\n🧹 Файл: %s (защищён от удаления)\n", result.filePath)
-			fmt.Printf("   Все %d контекстов недоступны и будут удалены:\n", result.totalContexts)
+			fmt.Printf("%s⚠ %s%s\n", yellow, result.filePath, reset)
 			for _, ctx := range result.unavailableContexts {
-				fmt.Printf("   - %s\n", ctx)
+				fmt.Printf("%s  ✗ %s%s\n", yellow, ctx, reset)
 			}
-			fmt.Printf("   ⚠️  Файл останется пустым\n")
 		} else {
 			contextsToDelete += len(result.unavailableContexts)
-			fmt.Printf("\n🧹 Файл: %s\n", result.filePath)
-			fmt.Printf("   Недоступные контексты (%d из %d):\n", len(result.unavailableContexts), result.totalContexts)
+			fmt.Printf("%s○ %s%s\n", cyan, result.filePath, reset)
 			for _, ctx := range result.unavailableContexts {
-				fmt.Printf("   - %s\n", ctx)
+				fmt.Printf("%s  ✗ %s%s\n", red, ctx, reset)
 			}
-			fmt.Printf("   Доступные контексты (%d): %s\n", len(result.availableContexts), strings.Join(result.availableContexts, ", "))
+			for _, ctx := range result.availableContexts {
+				fmt.Printf("%s  ✓ %s%s\n", green, ctx, reset)
+			}
 		}
 	}
 
-	fmt.Println("\n" + strings.Repeat("=", 70))
-	fmt.Printf("Итого: %d файлов будет удалено, %d контекстов будет удалено\n", filesToDelete, contextsToDelete)
-	fmt.Println(strings.Repeat("=", 70))
+	fmt.Printf("\n%d файлов • %d контекстов\n", filesToDelete, contextsToDelete)
 
 	if cleanupDryRun {
-		fmt.Println("\n🔍 Режим dry-run: изменения не применены")
+		fmt.Println("Режим dry-run: изменения не применены")
 		return nil
 	}
 
 	// Запрашиваем подтверждение
 	if !cleanupNoConfirm {
-		fmt.Print("\nПродолжить удаление? (yes/no): ")
-		reader := bufio.NewReader(os.Stdin)
-		input, err := reader.ReadString('\n')
-		if err != nil {
-			return fmt.Errorf("ошибка чтения ввода: %w", err)
-		}
-		input = strings.TrimSpace(strings.ToLower(input))
-		if input != "yes" && input != "y" {
+		result, _ := pterm.DefaultInteractiveConfirm.
+			WithDefaultText("Продолжить?").
+			WithDefaultValue(false).
+			Show()
+		if !result {
 			fmt.Println("Отменено")
 			return nil
 		}
 	}
 
 	// Выполняем очистку
-	fmt.Println("\nВыполнение очистки...")
+	fmt.Println()
 
 	for _, result := range results {
 		if result.shouldDeleteFile {
 			if err := os.Remove(result.filePath); err != nil {
-				fmt.Fprintf(os.Stderr, "❌ Не удалось удалить %s: %v\n", result.filePath, err)
+				pterm.FgRed.Printf("✗ Не удалось удалить %s: %v\n", result.filePath, err)
 			} else {
-				fmt.Printf("✓ Удалён файл: %s\n", result.filePath)
+				pterm.FgGreen.Printf("✓ Удалён: %s\n", result.filePath)
 			}
 		} else {
 			if err := cleaner.RemoveContextsFromFile(result.filePath, result.unavailableContexts); err != nil {
-				fmt.Fprintf(os.Stderr, "❌ Не удалось очистить %s: %v\n", result.filePath, err)
+				pterm.FgRed.Printf("✗ Не удалось очистить %s: %v\n", result.filePath, err)
 			} else {
-				fmt.Printf("✓ Удалено %d контекстов из %s\n", len(result.unavailableContexts), result.filePath)
+				pterm.FgGreen.Printf("✓ Удалено %d контекстов из %s\n", len(result.unavailableContexts), result.filePath)
 			}
 		}
 	}
 
-	fmt.Println("\n✓ Очистка завершена")
+	fmt.Println()
+	pterm.FgGreen.Println("✓ Готово")
 	return nil
 }
