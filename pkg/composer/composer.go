@@ -483,9 +483,16 @@ func (c *Composer) showConflictsAndAsk() bool {
 	// Создаем одну таблицу со всеми конфликтами
 	tableData := pterm.TableData{}
 
+	first := true
 	for source, conflicts := range conflictsBySource {
-		// Добавляем строку с путем к конфигу (spanning across all columns)
-		tableData = append(tableData, []string{source})
+		// Добавляем пустую строку-разделитель между конфигами
+		if !first {
+			tableData = append(tableData, []string{"", "", ""})
+		}
+		first = false
+
+		// Добавляем строку с путем к конфигу
+		tableData = append(tableData, []string{source, "", ""})
 
 		// Добавляем заголовок для этой секции
 		tableData = append(tableData, []string{"Тип", "До", "После"})
@@ -516,7 +523,7 @@ func (c *Composer) showConflictsAndAsk() bool {
 		}
 	}
 
-	pterm.DefaultTable.WithData(tableData).Render()
+	pterm.DefaultTable.WithHasHeader(false).WithBoxed(true).WithData(tableData).Render()
 	fmt.Println()
 
 	fmt.Print("Применить эти имена автоматически? [Y/n]: ")
