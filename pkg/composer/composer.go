@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/naymi/kubeconfig-composer/pkg/scanner"
+	"github.com/olekukonko/tablewriter"
 	"github.com/pterm/pterm"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -480,41 +481,39 @@ func (c *Composer) showConflictsAndAsk() bool {
 		conflictsBySource[conflict.source] = append(conflictsBySource[conflict.source], conflict)
 	}
 
-	// Создаем одну таблицу со всеми конфликтами
-	tableData := pterm.TableData{}
+	// Создаем таблицу с tablewriter для лучшего контроля над границами
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetBorder(true)
+	table.SetRowLine(true)
+	table.SetAutoWrapText(false)
+	table.SetAlignment(tablewriter.ALIGN_LEFT)
 
-	first := true
+	// Добавляем данные
 	for source, conflicts := range conflictsBySource {
-		// Добавляем пустую строку-разделитель между конфигами
-		if !first {
-			tableData = append(tableData, []string{"", "", ""})
-		}
-		first = false
-
 		// Добавляем строку с путем к конфигу
-		tableData = append(tableData, []string{source, "", ""})
+		table.Append([]string{source, "", ""})
 
 		// Добавляем заголовок для этой секции
-		tableData = append(tableData, []string{"Тип", "До", "После"})
+		table.Append([]string{"Тип", "До", "После"})
 
 		// Добавляем конфликты
 		for _, conflict := range conflicts {
 			if conflict.clusterOld != "" {
-				tableData = append(tableData, []string{
+				table.Append([]string{
 					"cluster",
 					conflict.clusterOld,
 					conflict.clusterNew,
 				})
 			}
 			if conflict.userOld != "" {
-				tableData = append(tableData, []string{
+				table.Append([]string{
 					"user",
 					conflict.userOld,
 					conflict.userNew,
 				})
 			}
 			if conflict.contextOld != "" {
-				tableData = append(tableData, []string{
+				table.Append([]string{
 					"context",
 					conflict.contextOld,
 					conflict.contextNew,
@@ -523,7 +522,7 @@ func (c *Composer) showConflictsAndAsk() bool {
 		}
 	}
 
-	pterm.DefaultTable.WithHasHeader(false).WithBoxed(true).WithData(tableData).Render()
+	table.Render()
 	fmt.Println()
 
 	fmt.Print("Применить эти имена автоматически? [Y/n]: ")
