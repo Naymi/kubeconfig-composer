@@ -12,9 +12,10 @@ import (
 )
 
 var (
-	kubeDir string
-	files   string
-	output  string
+	kubeDir    string
+	files      string
+	output     string
+	autoAccept bool
 )
 
 var mergeCmd = &cobra.Command{
@@ -32,7 +33,10 @@ var mergeCmd = &cobra.Command{
   kubeconfig-composer merge --files ~/.kube/config,~/.kube/dev.yaml
 
   # Указать выходной файл
-  kubeconfig-composer merge --output ~/.kube/merged-config`,
+  kubeconfig-composer merge --output ~/.kube/merged-config
+
+  # Автоматически принять все предложенные имена без запроса
+  kubeconfig-composer merge -y`,
 	RunE: runMerge,
 }
 
@@ -42,10 +46,11 @@ func init() {
 	mergeCmd.Flags().StringVarP(&kubeDir, "dir", "d", filepath.Join(os.Getenv("HOME"), ".kube"), "Директория для сканирования kubeconfig файлов")
 	mergeCmd.Flags().StringVarP(&files, "files", "f", "", "Список kubeconfig файлов через запятую")
 	mergeCmd.Flags().StringVarP(&output, "output", "o", "merged-kubeconfig.yaml", "Путь к выходному файлу")
+	mergeCmd.Flags().BoolVarP(&autoAccept, "auto-accept", "y", false, "Автоматически принимать предложенные имена при конфликтах")
 }
 
 func runMerge(cmd *cobra.Command, args []string) error {
-	c := composer.New()
+	c := composer.New(autoAccept)
 
 	// Шаг 1: Загрузка файлов
 	if files != "" {

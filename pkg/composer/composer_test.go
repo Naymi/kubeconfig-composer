@@ -10,7 +10,7 @@ import (
 )
 
 func TestGetUniqueName(t *testing.T) {
-	c := New()
+	c := New(true) // autoAccept = true для тестов
 
 	name1 := c.getUniqueName("prod", "context", "source1", "/path/to/file1", "prod")
 	if name1 != "prod" {
@@ -29,7 +29,7 @@ func TestGetUniqueName(t *testing.T) {
 }
 
 func TestMergeConfig(t *testing.T) {
-	c := New()
+	c := New(true) // autoAccept = true для тестов
 
 	config1 := clientcmdapi.NewConfig()
 	config1.Clusters["cluster1"] = &clientcmdapi.Cluster{Server: "https://server1"}
