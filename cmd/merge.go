@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/naymi/kubeconfig-composer/pkg/composer"
 	"github.com/pterm/pterm"
@@ -12,10 +14,11 @@ import (
 )
 
 var (
-	kubeDir    string
-	files      string
-	output     string
-	autoAccept bool
+	kubeDir      string
+	files        string
+	output       string
+	autoAccept   bool
+	cleanupAfter bool
 )
 
 var mergeCmd = &cobra.Command{
@@ -36,7 +39,10 @@ var mergeCmd = &cobra.Command{
   kubeconfig-composer merge --output ~/.kube/merged-config
 
   # Автоматически принять все предложенные имена без запроса
-  kubeconfig-composer merge -y`,
+  kubeconfig-composer merge -y
+
+  # Объединить и переместить исходные файлы в trash
+  kubeconfig-composer merge --cleanup`,
 	RunE: runMerge,
 }
 
@@ -45,8 +51,9 @@ func init() {
 
 	mergeCmd.Flags().StringVarP(&kubeDir, "dir", "d", filepath.Join(os.Getenv("HOME"), ".kube"), "Директория для сканирования kubeconfig файлов")
 	mergeCmd.Flags().StringVarP(&files, "files", "f", "", "Список kubeconfig файлов через запятую")
-	mergeCmd.Flags().StringVarP(&output, "output", "o", "merged-kubeconfig.yaml", "Путь к выходному файлу")
+	mergeCmd.Flags().StringVarP(&output, "output", "o", filepath.Join(os.Getenv("HOME"), ".kube", "config"), "Путь к выходному файлу")
 	mergeCmd.Flags().BoolVarP(&autoAccept, "auto-accept", "y", false, "Автоматически принимать предложенные имена при конфликтах")
+	mergeCmd.Flags().BoolVar(&cleanupAfter, "cleanup", false, "Переместить объединённые файлы в .kubeconfig-composer/trash")
 }
 
 func runMerge(cmd *cobra.Command, args []string) error {
@@ -67,7 +74,12 @@ func runMerge(cmd *cobra.Command, args []string) error {
 		if err := c.ScanDirectory(kubeDir); err != nil {
 			return fmt.Errorf("не удалось просканировать директорию: %w", err)
 		}
-		fmt.Printf("Найдено %d файлов\n", len(c.GetLoadedFiles()))
+		loadedFiles := c.GetLoadedFiles()
+		fmt.Printf("Найдено %d файлов:\n", len(loadedFiles))
+		for _, f := range loadedFiles {
+			configName := filepath.Base(f.GetFullPath())
+			fmt.Printf("  • \033[36m%s\033[0m\n", configName)
+		}
 	}
 
 	// Шаг 2: Объединение конфигураций
@@ -76,11 +88,149 @@ func runMerge(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("не удалось объединить конфигурации: %w", err)
 	}
 
-	// Шаг 3: Запись результата
+	// Показываем таблицу принятых изменений
+	c.ShowAppliedChanges()
+
+	// Шаг 3: Проверка существования файла и создание бэкапа
+	if _, err := os.Stat(output); err == nil {
+		// Файл существует, спрашиваем подтверждение
+		timestamp := time.Now().Format("20060102-150405")
+
+		// Создаём директорию для бэкапов
+		backupDir := filepath.Join(os.Getenv("HOME"), ".kubeconfig-composer", "backups")
+		if err := os.MkdirAll(backupDir, 0755); err != nil {
+			return fmt.Errorf("не удалось создать директорию для бэкапов: %w", err)
+		}
+
+		backupFileName := fmt.Sprintf("%s.backup.%s", filepath.Base(output), timestamp)
+		backupPath := filepath.Join(backupDir, backupFileName)
+
+		fmt.Printf("\n⚠️  Файл %s уже существует.\n", output)
+		fmt.Printf("Будет создан бэкап: %s\n", backupPath)
+		fmt.Print("Перезаписать? [y/N]: ")
+
+		reader := bufio.NewReader(os.Stdin)
+		response, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("ошибка чтения ввода: %w", err)
+		}
+		response = strings.ToLower(strings.TrimSpace(response))
+
+		if response != "y" && response != "yes" && response != "д" && response != "да" {
+			fmt.Println("Отменено.")
+			return nil
+		}
+
+		// Создаем бэкап
+		if err := copyFile(output, backupPath); err != nil {
+			return fmt.Errorf("не удалось создать бэкап: %w", err)
+		}
+
+		pterm.FgYellow.Printf("📦 Создан бэкап: %s\n", backupPath)
+	}
+
+	// Шаг 4: Запись результата
 	if err := c.WriteOutput(output); err != nil {
 		return fmt.Errorf("не удалось записать результат: %w", err)
 	}
 
 	pterm.FgGreen.Printf("✓ Готово: %s\n", output)
+
+	// Шаг 5: Очистка исходных файлов (если запрошено)
+	if cleanupAfter {
+		if err := cleanupSourceFiles(c, output); err != nil {
+			return fmt.Errorf("не удалось выполнить очистку: %w", err)
+		}
+	} else if files == "" {
+		// Если не указан флаг --cleanup, спрашиваем пользователя
+		fmt.Print("\nПереместить объединённые файлы в trash? [y/N]: ")
+		reader := bufio.NewReader(os.Stdin)
+		response, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("ошибка чтения ввода: %w", err)
+		}
+		response = strings.ToLower(strings.TrimSpace(response))
+
+		if response == "y" || response == "yes" || response == "д" || response == "да" {
+			if err := cleanupSourceFiles(c, output); err != nil {
+				return fmt.Errorf("не удалось выполнить очистку: %w", err)
+			}
+		}
+	}
+
 	return nil
+}
+
+// cleanupSourceFiles перемещает исходные файлы в trash
+func cleanupSourceFiles(c *composer.Composer, outputPath string) error {
+	loadedFiles := c.GetLoadedFiles()
+	if len(loadedFiles) == 0 {
+		return nil
+	}
+
+	// Создаём директорию trash
+	trashDir := filepath.Join(os.Getenv("HOME"), ".kubeconfig-composer", "trash")
+	if err := os.MkdirAll(trashDir, 0755); err != nil {
+		return fmt.Errorf("не удалось создать директорию trash: %w", err)
+	}
+
+	// Получаем абсолютный путь к выходному файлу
+	absOutput, err := filepath.Abs(outputPath)
+	if err != nil {
+		return fmt.Errorf("не удалось получить абсолютный путь: %w", err)
+	}
+
+	timestamp := time.Now().Format("20060102-150405")
+	movedCount := 0
+	skippedCount := 0
+
+	fmt.Println("\nПеремещение файлов в trash...")
+
+	for _, f := range loadedFiles {
+		sourcePath := f.GetFullPath()
+		absSource, err := filepath.Abs(sourcePath)
+		if err != nil {
+			pterm.FgYellow.Printf("⚠ Пропущен %s: %v\n", sourcePath, err)
+			skippedCount++
+			continue
+		}
+
+		// Не перемещаем выходной файл
+		if absSource == absOutput {
+			skippedCount++
+			continue
+		}
+
+		// Формируем имя файла в trash с timestamp
+		baseName := filepath.Base(sourcePath)
+		trashPath := filepath.Join(trashDir, fmt.Sprintf("%s.%s", timestamp, baseName))
+
+		// Перемещаем файл
+		if err := os.Rename(sourcePath, trashPath); err != nil {
+			pterm.FgRed.Printf("✗ Не удалось переместить %s: %v\n", sourcePath, err)
+			skippedCount++
+			continue
+		}
+
+		pterm.FgGreen.Printf("✓ Перемещён: %s → trash/\n", filepath.Base(sourcePath))
+		movedCount++
+	}
+
+	if movedCount > 0 {
+		fmt.Printf("\n%d файлов перемещено в %s\n", movedCount, trashDir)
+	}
+	if skippedCount > 0 {
+		fmt.Printf("%d файлов пропущено\n", skippedCount)
+	}
+
+	return nil
+}
+
+// copyFile копирует файл из src в dst
+func copyFile(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0600)
 }

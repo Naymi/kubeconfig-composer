@@ -19,6 +19,10 @@ type configWithSource struct {
 	fullPath string // полный путь к файлу
 }
 
+func (c *configWithSource) GetFullPath() string {
+	return c.fullPath
+}
+
 type Composer struct {
 	configs        []configWithSource
 	mergedConfig   *clientcmdapi.Config
@@ -300,7 +304,8 @@ func (c *Composer) getUniqueName(name, prefix, source, fullPath, originalItemNam
 				itemType: prefix,
 				itemName: originalName,
 			}
-			pterm.FgCyan.Printf("→ Автоматически принято: %s → %s\n", name, suggestedName)
+			// Цветной вывод: желтый для старого, зеленый для нового
+			fmt.Printf("→ Автоматически принято: \033[33m%s\033[0m → \033[32m%s\033[0m\n", name, suggestedName)
 			return suggestedName
 		}
 		// Если занято, используем числовой суффикс
@@ -311,7 +316,7 @@ func (c *Composer) getUniqueName(name, prefix, source, fullPath, originalItemNam
 			itemType: prefix,
 			itemName: originalName,
 		}
-		pterm.FgCyan.Printf("→ Автоматически принято: %s → %s\n", name, finalName)
+		fmt.Printf("→ Автоматически принято: \033[33m%s\033[0m → \033[32m%s\033[0m\n", name, finalName)
 		return finalName
 	}
 
@@ -481,40 +486,58 @@ func (c *Composer) showConflictsAndAsk() bool {
 		conflictsBySource[conflict.source] = append(conflictsBySource[conflict.source], conflict)
 	}
 
-	// Создаем таблицу с tablewriter для лучшего контроля над границами
+	// Создаем таблицу с tablewriter
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetBorder(true)
 	table.SetRowLine(true)
 	table.SetAutoWrapText(false)
 	table.SetAlignment(tablewriter.ALIGN_LEFT)
 
+	// Добавляем заголовок таблицы
+	table.SetHeader([]string{"Конфиг / Тип", "До", "После"})
+
+	// Настраиваем цвета для заголовков и колонок (после SetHeader!)
+	table.SetHeaderColor(
+		tablewriter.Colors{tablewriter.Bold, tablewriter.FgCyanColor},
+		tablewriter.Colors{tablewriter.Bold, tablewriter.FgYellowColor},
+		tablewriter.Colors{tablewriter.Bold, tablewriter.FgGreenColor},
+	)
+
+	table.SetColumnColor(
+		tablewriter.Colors{tablewriter.FgWhiteColor},
+		tablewriter.Colors{tablewriter.FgYellowColor},
+		tablewriter.Colors{tablewriter.FgGreenColor},
+	)
+
 	// Добавляем данные
 	for source, conflicts := range conflictsBySource {
-		// Добавляем строку с путем к конфигу
-		table.Append([]string{source, "", ""})
-
-		// Добавляем заголовок для этой секции
-		table.Append([]string{"Тип", "До", "После"})
+		// Добавляем строку с путем к конфигу (выделяем цветом)
+		configName := filepath.Base(source)
+		table.Append([]string{
+			fmt.Sprintf("\033[1;36m%s\033[0m", configName), // Bold Cyan
+			"",
+			"",
+		})
 
 		// Добавляем конфликты
 		for _, conflict := range conflicts {
 			if conflict.clusterOld != "" {
 				table.Append([]string{
-					"cluster",
+					"  cluster",
 					conflict.clusterOld,
 					conflict.clusterNew,
 				})
 			}
 			if conflict.userOld != "" {
 				table.Append([]string{
-					"user",
+					"  user",
 					conflict.userOld,
 					conflict.userNew,
 				})
 			}
 			if conflict.contextOld != "" {
 				table.Append([]string{
-					"context",
+					"  context",
 					conflict.contextOld,
 					conflict.contextNew,
 				})
@@ -532,5 +555,81 @@ func (c *Composer) showConflictsAndAsk() bool {
 	response = strings.TrimSpace(strings.ToLower(response))
 
 	return response == "" || response == "y" || response == "yes" || response == "д" || response == "да"
+}
+
+func (c *Composer) ShowAppliedChanges() {
+	if len(c.conflicts) == 0 {
+		return
+	}
+
+	fmt.Println()
+	pterm.FgGreen.Println("✓ Применённые изменения")
+	fmt.Println()
+
+	// Группируем конфликты по источнику
+	conflictsBySource := make(map[string][]conflictResolution)
+	for _, conflict := range c.conflicts {
+		conflictsBySource[conflict.source] = append(conflictsBySource[conflict.source], conflict)
+	}
+
+	// Создаем таблицу
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetBorder(true)
+	table.SetRowLine(true)
+	table.SetAutoWrapText(false)
+	table.SetAlignment(tablewriter.ALIGN_LEFT)
+
+	// Заголовок
+	table.SetHeader([]string{"Конфиг / Тип", "До", "После"})
+
+	// Цвета
+	table.SetHeaderColor(
+		tablewriter.Colors{tablewriter.Bold, tablewriter.FgCyanColor},
+		tablewriter.Colors{tablewriter.Bold, tablewriter.FgYellowColor},
+		tablewriter.Colors{tablewriter.Bold, tablewriter.FgGreenColor},
+	)
+
+	table.SetColumnColor(
+		tablewriter.Colors{tablewriter.FgWhiteColor},
+		tablewriter.Colors{tablewriter.FgYellowColor},
+		tablewriter.Colors{tablewriter.FgGreenColor},
+	)
+
+	// Добавляем данные
+	for source, conflicts := range conflictsBySource {
+		configName := filepath.Base(source)
+		table.Append([]string{
+			fmt.Sprintf("\033[1;36m%s\033[0m", configName),
+			"",
+			"",
+		})
+
+		for _, conflict := range conflicts {
+			if conflict.clusterOld != "" {
+				table.Append([]string{
+					"  cluster",
+					conflict.clusterOld,
+					conflict.clusterNew,
+				})
+			}
+			if conflict.userOld != "" {
+				table.Append([]string{
+					"  user",
+					conflict.userOld,
+					conflict.userNew,
+				})
+			}
+			if conflict.contextOld != "" {
+				table.Append([]string{
+					"  context",
+					conflict.contextOld,
+					conflict.contextNew,
+				})
+			}
+		}
+	}
+
+	table.Render()
+	fmt.Println()
 }
 

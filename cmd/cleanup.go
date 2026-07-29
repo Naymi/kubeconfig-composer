@@ -59,11 +59,11 @@ func init() {
 }
 
 type cleanupResult struct {
-	filePath           string
-	totalContexts      int
+	filePath            string
+	totalContexts       int
 	unavailableContexts []string
 	availableContexts   []string
-	shouldDeleteFile   bool
+	shouldDeleteFile    bool
 }
 
 func runCleanup(cmd *cobra.Command, args []string) error {
@@ -81,6 +81,10 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 		kubeconfigFiles = files
 		fmt.Printf("Найдено %d файлов\n", len(files))
 	} else {
+		// Проверяем существование файла
+		if _, err := os.Stat(cleanupKubeconfig); os.IsNotExist(err) {
+			return fmt.Errorf("файл не найден: %s", cleanupKubeconfig)
+		}
 		kubeconfigFiles = []string{cleanupKubeconfig}
 	}
 
@@ -98,7 +102,28 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 		totalContexts += len(config.Contexts)
 	}
 
-	fmt.Printf("Анализ %d контекстов...\n", totalContexts)
+	// Создаём spinner для отображения текущей активности
+	spinner, _ := pterm.DefaultSpinner.Start("Анализ контекстов...")
+
+	// Канал для логирования
+	type logMessage struct {
+		context   string
+		file      string
+		status    string
+		message   string
+		timestamp int
+	}
+	logChan := make(chan logMessage, totalContexts)
+	processedCount := 0
+
+	// Дедуплицируем кластеры перед проверкой
+	type clusterKey struct {
+		server string
+		caData string
+	}
+	clusterCache := make(map[clusterKey]bool) // true = доступен, false = недоступен
+	clusterCacheMutex := make(chan struct{}, 1)
+	clusterCacheMutex <- struct{}{} // Инициализируем мьютекс
 
 	// Анализируем каждый файл параллельно
 	for _, kubeconfigPath := range kubeconfigFiles {
@@ -116,8 +141,8 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 			}
 
 			result := cleanupResult{
-				filePath:           kPath,
-				totalContexts:      len(config.Contexts),
+				filePath:            kPath,
+				totalContexts:       len(config.Contexts),
 				unavailableContexts: make([]string, 0),
 				availableContexts:   make([]string, 0),
 			}
@@ -132,14 +157,103 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 			// Проверяем доступность каждого контекста параллельно
 			for contextName, contextInfo := range config.Contexts {
 				semaphore <- struct{}{} // Захватываем слот
-				go func(cName string, clusterName string) {
+				go func(cName string, clusterName string, filePath string) {
 					defer func() { <-semaphore }() // Освобождаем слот
-					status := checker.CheckClusterStatus(kPath, cName, clusterName, cleanupTimeout)
+
+					// Получаем информацию о кластере для дедупликации
+					cluster := config.Clusters[clusterName]
+					if cluster == nil {
+						logChan <- logMessage{
+							context: cName,
+							file:    filepath.Base(filePath),
+							status:  "✗",
+							message: fmt.Sprintf("✗ %s: кластер не найден", cName),
+						}
+						checkChan <- contextCheck{name: cName, available: false}
+						return
+					}
+
+					key := clusterKey{
+						server: cluster.Server,
+						caData: string(cluster.CertificateAuthorityData),
+					}
+
+					// Проверяем кеш
+					<-clusterCacheMutex
+					cached, exists := clusterCache[key]
+					clusterCacheMutex <- struct{}{}
+
+					if exists {
+						// Используем закешированный результат
+						logChan <- logMessage{
+							context: cName,
+							file:    filepath.Base(filePath),
+							status:  "cached",
+							message: fmt.Sprintf("⚡ %s (кеш)", cName),
+						}
+
+						var statusMsg string
+						if cached {
+							statusMsg = fmt.Sprintf("✓ %s доступен (кеш)", cName)
+						} else {
+							statusMsg = fmt.Sprintf("✗ %s недоступен (кеш)", cName)
+						}
+
+						logChan <- logMessage{
+							context: cName,
+							file:    filepath.Base(filePath),
+							status: func() string {
+								if cached {
+									return "✓"
+								} else {
+									return "✗"
+								}
+							}(),
+							message: statusMsg,
+						}
+
+						checkChan <- contextCheck{
+							name:      cName,
+							available: cached,
+						}
+						return
+					}
+
+					// Выполняем реальную проверку
+					logChan <- logMessage{
+						context: cName,
+						file:    filepath.Base(filePath),
+						status:  "checking",
+						message: fmt.Sprintf("Проверка %s...", cName),
+					}
+
+					status := checker.CheckClusterStatus(filePath, cName, clusterName, cleanupTimeout)
+					available := status.Status == "✓" || status.Status == "⚠"
+
+					// Сохраняем в кеш
+					<-clusterCacheMutex
+					clusterCache[key] = available
+					clusterCacheMutex <- struct{}{}
+
+					var statusMsg string
+					if available {
+						statusMsg = fmt.Sprintf("✓ %s доступен", cName)
+					} else {
+						statusMsg = fmt.Sprintf("✗ %s недоступен: %s", cName, status.Error)
+					}
+
+					logChan <- logMessage{
+						context: cName,
+						file:    filepath.Base(filePath),
+						status:  status.Status,
+						message: statusMsg,
+					}
+
 					checkChan <- contextCheck{
 						name:      cName,
-						available: status.Status == "✓" || status.Status == "⚠",
+						available: available,
 					}
-				}(contextName, contextInfo.Cluster)
+				}(contextName, contextInfo.Cluster, kPath)
 			}
 
 			// Собираем результаты проверок контекстов
@@ -170,6 +284,26 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 		}(kubeconfigPath)
 	}
 
+	// Горутина для обработки логов в реальном времени
+	logDone := make(chan struct{})
+	go func() {
+		defer close(logDone)
+		for log := range logChan {
+			processedCount++
+			if log.status == "checking" {
+				spinner.UpdateText(fmt.Sprintf("[%d/%d] %s", processedCount/2, totalContexts, log.message))
+			} else {
+				spinner.Stop()
+				if log.status == "✓" || log.status == "⚠" || log.status == "cached" {
+					pterm.Success.Printf("[%s] %s\n", log.file, log.message)
+				} else {
+					pterm.Warning.Printf("[%s] %s\n", log.file, log.message)
+				}
+				spinner, _ = pterm.DefaultSpinner.Start(fmt.Sprintf("Обработано %d/%d контекстов", processedCount/2, totalContexts))
+			}
+		}
+	}()
+
 	// Собираем результаты по всем файлам
 	for i := 0; i < len(kubeconfigFiles); i++ {
 		result := <-resultChan
@@ -178,6 +312,9 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 		}
 	}
 	close(resultChan)
+	close(logChan)
+	<-logDone // Ждём завершения обработки логов
+	spinner.Stop()
 
 	if len(results) == 0 {
 		fmt.Println("\n✓ Все контексты доступны")
@@ -197,11 +334,13 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 
 	filesToDelete := 0
 	contextsToDelete := 0
+	contextsToKeep := 0
 
 	defaultConfig := filepath.Join(os.Getenv("HOME"), ".kube", "config")
 	absDefault, _ := filepath.Abs(defaultConfig)
 
 	for _, result := range results {
+		contextsToKeep += len(result.availableContexts)
 		absPath, _ := filepath.Abs(result.filePath)
 		isDefaultConfig := absPath == absDefault
 
@@ -229,7 +368,7 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Printf("\n%d файлов • %d контекстов\n", filesToDelete, contextsToDelete)
+	fmt.Printf("\n%d файлов • %d контекстов будет удалено • %d контекстов останется\n", filesToDelete, contextsToDelete, contextsToKeep)
 
 	if cleanupDryRun {
 		fmt.Println("Режим dry-run: изменения не применены")

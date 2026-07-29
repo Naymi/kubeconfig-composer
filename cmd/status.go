@@ -53,7 +53,6 @@ func init() {
 	statusCmd.Flags().StringVarP(&statusDir, "dir", "d", defaultDir, "Директория для поиска kubeconfig файлов (используется с --all)")
 }
 
-
 func runStatus(cmd *cobra.Command, args []string) error {
 	var kubeconfigFiles []string
 
@@ -96,6 +95,15 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Проверка %d контекстов...\n", totalContexts)
 
+	// Дедуплицируем кластеры перед проверкой
+	type clusterKey struct {
+		server string
+		caData string
+	}
+	clusterCache := make(map[clusterKey]checker.ClusterStatus)
+	clusterCacheMutex := make(chan struct{}, 1)
+	clusterCacheMutex <- struct{}{} // Инициализируем мьютекс
+
 	// Проверяем каждый файл
 	for _, kubeconfigPath := range kubeconfigFiles {
 		// Загружаем kubeconfig
@@ -113,7 +121,58 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			semaphore <- struct{}{} // Захватываем слот
 			go func(kPath, cName, cInfo string) {
 				defer func() { <-semaphore }() // Освобождаем слот
-				status := checker.CheckClusterStatus(kPath, cName, cInfo, statusTimeout)
+
+				// Загружаем конфиг для получения информации о кластере
+				cfg, err := clientcmd.LoadFromFile(kPath)
+				if err != nil {
+					statusChan <- checker.ClusterStatus{
+						Context: cName,
+						Cluster: cInfo,
+						Status:  "✗",
+						Version: "-",
+						Error:   "не удалось загрузить конфиг",
+					}
+					return
+				}
+
+				cluster := cfg.Clusters[cInfo]
+				if cluster == nil {
+					statusChan <- checker.ClusterStatus{
+						Context: cName,
+						Cluster: cInfo,
+						Status:  "✗",
+						Version: "-",
+						Error:   "кластер не найден",
+					}
+					return
+				}
+
+				key := clusterKey{
+					server: cluster.Server,
+					caData: string(cluster.CertificateAuthorityData),
+				}
+
+				// Проверяем кеш
+				<-clusterCacheMutex
+				cached, exists := clusterCache[key]
+				clusterCacheMutex <- struct{}{}
+
+				var status checker.ClusterStatus
+				if exists {
+					// Используем закешированный результат
+					status = cached
+					status.Context = cName
+					status.Cluster = cInfo
+				} else {
+					// Выполняем реальную проверку
+					status = checker.CheckClusterStatus(kPath, cName, cInfo, statusTimeout)
+
+					// Сохраняем в кеш
+					<-clusterCacheMutex
+					clusterCache[key] = status
+					clusterCacheMutex <- struct{}{}
+				}
+
 				if statusAll {
 					status.Context = fmt.Sprintf("%s (%s)", cName, filepath.Base(kPath))
 				}
@@ -166,4 +225,3 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 	return nil
 }
-

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/naymi/kubeconfig-composer/pkg/scanner"
 	"github.com/spf13/cobra"
@@ -70,9 +69,23 @@ func runList(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		fmt.Printf("  ✓ %s\n", file)
+		fmt.Print("  ✓ ")
+		// Выделяем имя файла цветом
+		baseName := filepath.Base(file)
+		dirPath := filepath.Dir(file)
+		fmt.Printf("%s/", dirPath)
+		fmt.Printf("\033[36m%s\033[0m\n", baseName) // Cyan color
+
 		if len(config.Contexts) > 0 {
-			fmt.Printf("    Контексты: %s\n", strings.Join(getContextNames(config.Contexts), ", "))
+			contextNames := getContextNames(config.Contexts)
+			fmt.Print("    Контексты: ")
+			for i, name := range contextNames {
+				if i > 0 {
+					fmt.Print(", ")
+				}
+				fmt.Printf("\033[33m%s\033[0m", name) // Yellow color
+			}
+			fmt.Println()
 		}
 	}
 
