@@ -34,10 +34,11 @@ go install github.com/naymi/kubeconfig-composer@latest
 ### Command Structure (Cobra-based CLI)
 All commands are in `cmd/` directory:
 - `root.go` - Root command definition and Execute() function
-- `merge.go` - Merges multiple kubeconfig files with conflict resolution
+- `merge.go` - Merges multiple kubeconfig files with conflict resolution. Defaults output to `~/.kube/config`; backs up an existing output file before overwriting; `--cleanup` moves source files to trash after a successful merge
 - `list.go` - Lists all kubeconfig files found in a directory
 - `status.go` - Checks connectivity to clusters and displays status table
 - `cleanup.go` - Removes unreachable contexts and optionally deletes empty files
+- `revert.go` - Restores an output file (default `~/.kube/config`) from the most recent backup that differs from the current file; `--list` shows available backups
 
 ### Core Packages
 
@@ -72,6 +73,14 @@ When merging configs, the tool:
 3. On name conflicts, prompts user interactively with context about both conflicting items
 4. Suggests auto-generated names based on source filename
 5. Tracks all names across clusters, users, and contexts separately
+
+### State Directory (`~/.kubeconfig-composer/`)
+The tool keeps its own working state outside the kube directory:
+- `backups/` - `merge` copies the pre-existing output file here as `<name>.backup.<timestamp>` before overwriting. `revert` reads from here.
+- `trash/` - `merge --cleanup` moves merged source files here as `<timestamp>.<name>` (uses `os.Rename`, never deletes outright), skipping the output file itself.
+
+### Cluster Deduplication Cache
+`status` and `cleanup` dedupe clusters before hitting the network: a cluster is keyed by `(server, CertificateAuthorityData)`, and the result is cached so identical clusters referenced by multiple contexts/files are only checked once. The cache is shared across goroutines and guarded by a 1-slot channel used as a mutex (`clusterCacheMutex <- struct{}{}` / `<-clusterCacheMutex`). This pattern appears inline in both `cmd/status.go` and `cmd/cleanup.go`.
 
 ### Kubernetes Client Integration
 Uses `k8s.io/client-go` for:
@@ -112,6 +121,8 @@ Key dependencies:
 - `k8s.io/client-go` - Kubernetes client library
 - `k8s.io/apimachinery` - Kubernetes API types
 - `gopkg.in/yaml.v3` - YAML parsing
+- `github.com/pterm/pterm` - Colored terminal output and spinners (progress during `status`/`cleanup`)
+- `github.com/olekukonko/tablewriter` - Renders the conflict/applied-changes tables in `merge`
 
 ## Notes
 
