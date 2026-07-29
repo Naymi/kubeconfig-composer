@@ -39,6 +39,7 @@ All commands are in `cmd/` directory:
 - `status.go` - Checks connectivity to clusters and displays status table
 - `cleanup.go` - Removes unreachable contexts and optionally deletes empty files
 - `revert.go` - Restores an output file (default `~/.kube/config`) from the most recent backup that differs from the current file; `--list` shows available backups
+- `dedupe.go` - Collapses content-identical clusters, users, and contexts in a single kubeconfig (default `$KUBECONFIG`/`~/.kube/config`); `--dry-run` previews, `-y` skips confirmation. Backs up before writing. Core logic lives in `pkg/cleaner/dedupe.go`
 
 ### Core Packages
 
@@ -65,6 +66,7 @@ Cluster connectivity checking:
 Kubeconfig cleanup utilities:
 - `RemoveContextsFromFile()` - Removes specified contexts and unused clusters/users
 - `WriteConfig()` - Safely writes kubeconfig to file with proper permissions
+- `Dedupe()` (`dedupe.go`) - Collapses content-identical entries. Clusters/users are grouped by content via `reflect.DeepEqual` (with `LocationOfOrigin` cleared, since it only records the source file); contexts are grouped by their `(Cluster, AuthInfo)` target, **ignoring namespace** — namespace-only variants collapse and the non-empty namespace is kept. Canonical name is the shortest (ties broken alphabetically), except names referenced by `current-context` always win so the active context never breaks. Returns a `DedupeReport` of what merged.
 
 ### Conflict Resolution Strategy
 When merging configs, the tool:
