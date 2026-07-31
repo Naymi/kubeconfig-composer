@@ -59,11 +59,31 @@ func init() {
 func runMerge(cmd *cobra.Command, args []string) error {
 	c := composer.New(autoAccept)
 
+	absOutput, _ := filepath.Abs(output)
+
+	// Шаг 0: если выходной файл уже существует — берём его как базу. Его записи
+	// грузятся первыми, поэтому их имена сохраняются и имеют приоритет, а сам
+	// файл больше не подхватывается при сканировании (см. exclude ниже).
+	if _, err := os.Stat(output); err == nil {
+		if err := c.LoadFiles([]string{output}); err != nil {
+			return fmt.Errorf("не удалось загрузить существующий конфиг %s: %w", output, err)
+		}
+		fmt.Printf("База: \033[36m%s\033[0m (существующий конфиг)\n", filepath.Base(output))
+	}
+
 	// Шаг 1: Загрузка файлов
 	if files != "" {
-		filePaths := strings.Split(files, ",")
-		for i, path := range filePaths {
-			filePaths[i] = strings.TrimSpace(path)
+		var filePaths []string
+		for _, path := range strings.Split(files, ",") {
+			path = strings.TrimSpace(path)
+			if path == "" {
+				continue
+			}
+			// Пропускаем выходной файл — он уже загружен как база.
+			if abs, err := filepath.Abs(path); err == nil && abs == absOutput {
+				continue
+			}
+			filePaths = append(filePaths, path)
 		}
 		fmt.Printf("Загрузка %d файлов...\n", len(filePaths))
 		if err := c.LoadFiles(filePaths); err != nil {
@@ -71,7 +91,7 @@ func runMerge(cmd *cobra.Command, args []string) error {
 		}
 	} else {
 		fmt.Printf("Сканирование %s...\n", kubeDir)
-		if err := c.ScanDirectory(kubeDir); err != nil {
+		if err := c.ScanDirectory(kubeDir, output); err != nil {
 			return fmt.Errorf("не удалось просканировать директорию: %w", err)
 		}
 		loadedFiles := c.GetLoadedFiles()
@@ -90,6 +110,13 @@ func runMerge(cmd *cobra.Command, args []string) error {
 
 	// Показываем таблицу принятых изменений
 	c.ShowAppliedChanges()
+
+	// Шаг 2.5: Убираем дубликаты по содержимому (в т.ч. записи под разными
+	// именами и контексты, отличающиеся только namespace). Делает результат
+	// повторного merge идемпотентным.
+	if report := c.Dedupe(); report.Changed() {
+		pterm.FgYellow.Printf("🧹 Убрано дубликатов (контекстов: %d)\n", report.TotalRemovedContexts())
+	}
 
 	// Шаг 3: Проверка существования файла и создание бэкапа
 	if _, err := os.Stat(output); err == nil {

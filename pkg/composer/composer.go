@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/naymi/kubeconfig-composer/pkg/cleaner"
 	"github.com/naymi/kubeconfig-composer/pkg/scanner"
 	"github.com/olekukonko/tablewriter"
 	"github.com/pterm/pterm"
@@ -32,8 +33,14 @@ type Composer struct {
 	clusterSources map[string]nameSource
 	userSources    map[string]nameSource
 	contextSources map[string]nameSource
-	autoAccept     bool
-	conflicts      []conflictResolution
+	// Первый увиденный объект под каждым именем — чтобы отличать настоящий
+	// конфликт (то же имя, другое содержимое) от повторного включения того же
+	// самого (то же имя, идентичное содержимое).
+	clusterObjs map[string]*clientcmdapi.Cluster
+	userObjs    map[string]*clientcmdapi.AuthInfo
+	contextObjs map[string]*clientcmdapi.Context
+	autoAccept  bool
+	conflicts   []conflictResolution
 }
 
 type conflictResolution struct {
@@ -62,6 +69,9 @@ func New(autoAccept bool) *Composer {
 		clusterSources: make(map[string]nameSource),
 		userSources:    make(map[string]nameSource),
 		contextSources: make(map[string]nameSource),
+		clusterObjs:    make(map[string]*clientcmdapi.Cluster),
+		userObjs:       make(map[string]*clientcmdapi.AuthInfo),
+		contextObjs:    make(map[string]*clientcmdapi.Context),
 		autoAccept:     autoAccept,
 		conflicts:      make([]conflictResolution, 0),
 	}
@@ -111,7 +121,16 @@ func (c *Composer) LoadFiles(files []string) error {
 	return nil
 }
 
-func (c *Composer) ScanDirectory(dir string) error {
+func (c *Composer) ScanDirectory(dir string, exclude ...string) error {
+	// Множество абсолютных путей, которые нужно пропустить при сканировании
+	// (например, сам выходной файл, чтобы не мержить его повторно).
+	excludeSet := make(map[string]bool, len(exclude))
+	for _, e := range exclude {
+		if abs, err := filepath.Abs(e); err == nil {
+			excludeSet[abs] = true
+		}
+	}
+
 	var kubeconfigPaths []string
 
 	// Сначала собираем все пути к файлам
@@ -125,6 +144,10 @@ func (c *Composer) ScanDirectory(dir string) error {
 		}
 
 		if !scanner.IsKubeconfigFile(path, info) {
+			return nil
+		}
+
+		if abs, err := filepath.Abs(path); err == nil && excludeSet[abs] {
 			return nil
 		}
 
@@ -223,12 +246,22 @@ func (c *Composer) mergeConfig(config *clientcmdapi.Config, source, fullPath str
 	userMapping := make(map[string]string)
 
 	for name, cluster := range config.Clusters {
+		// Если под этим именем уже лежит идентичный кластер — это повторное
+		// включение того же самого, переиспользуем без суффикса.
+		if existing, ok := c.mergedConfig.Clusters[name]; ok && cleaner.ClustersEqual(existing, cluster) {
+			clusterMapping[name] = name
+			continue
+		}
 		uniqueName := c.getUniqueName(name, "cluster", source, fullPath, name)
 		c.mergedConfig.Clusters[uniqueName] = cluster
 		clusterMapping[name] = uniqueName
 	}
 
 	for name, authInfo := range config.AuthInfos {
+		if existing, ok := c.mergedConfig.AuthInfos[name]; ok && cleaner.UsersEqual(existing, authInfo) {
+			userMapping[name] = name
+			continue
+		}
 		uniqueName := c.getUniqueName(name, "user", source, fullPath, name)
 		c.mergedConfig.AuthInfos[uniqueName] = authInfo
 		userMapping[name] = uniqueName
@@ -236,8 +269,6 @@ func (c *Composer) mergeConfig(config *clientcmdapi.Config, source, fullPath str
 
 	// Затем обрабатываем контексты, используя уже созданный маппинг
 	for name, context := range config.Contexts {
-		uniqueName := c.getUniqueName(name, "context", source, fullPath, name)
-
 		newContext := context.DeepCopy()
 		// Используем маппинг вместо повторного вызова getUniqueName
 		if mappedCluster, ok := clusterMapping[context.Cluster]; ok {
@@ -247,8 +278,29 @@ func (c *Composer) mergeConfig(config *clientcmdapi.Config, source, fullPath str
 			newContext.AuthInfo = mappedUser
 		}
 
+		// Если под этим именем уже лежит идентичный контекст — переиспользуем.
+		if existing, ok := c.mergedConfig.Contexts[name]; ok && contextsIdentical(existing, newContext) {
+			continue
+		}
+
+		uniqueName := c.getUniqueName(name, "context", source, fullPath, name)
 		c.mergedConfig.Contexts[uniqueName] = newContext
 	}
+}
+
+// contextsIdentical сравнивает контексты по цели (кластер, пользователь,
+// namespace) с уже применённым маппингом имён.
+func contextsIdentical(a, b *clientcmdapi.Context) bool {
+	return a.Cluster == b.Cluster && a.AuthInfo == b.AuthInfo && a.Namespace == b.Namespace
+}
+
+// Dedupe схлопывает в итоговом конфиге записи, идентичные по содержимому, но
+// оказавшиеся под разными именами (в т.ч. контексты, отличающиеся только
+// namespace). Делает результат merge идемпотентным. Возвращает отчёт.
+func (c *Composer) Dedupe() *cleaner.DedupeReport {
+	deduped, report := cleaner.Dedupe(c.mergedConfig)
+	c.mergedConfig = deduped
+	return report
 }
 
 func (c *Composer) getUniqueName(name, prefix, source, fullPath, originalItemName string) string {
@@ -403,6 +455,21 @@ func (c *Composer) detectConflicts(config *clientcmdapi.Config, source, fullPath
 		tempContextCounts[k] = v
 	}
 
+	// Копируем первые увиденные объекты, чтобы отличать реальный конфликт от
+	// повторного включения идентичной записи.
+	tempClusterObjs := make(map[string]*clientcmdapi.Cluster)
+	tempUserObjs := make(map[string]*clientcmdapi.AuthInfo)
+	tempContextObjs := make(map[string]*clientcmdapi.Context)
+	for k, v := range c.clusterObjs {
+		tempClusterObjs[k] = v
+	}
+	for k, v := range c.userObjs {
+		tempUserObjs[k] = v
+	}
+	for k, v := range c.contextObjs {
+		tempContextObjs[k] = v
+	}
+
 	// Проверяем контексты и связанные кластеры/пользователей
 	for contextName, context := range config.Contexts {
 		originalContextName := contextName
@@ -429,34 +496,46 @@ func (c *Composer) detectConflicts(config *clientcmdapi.Config, source, fullPath
 
 		hasConflict := false
 
-		// Проверяем кластер
-		if _, exists := tempClusterCounts[clusterName]; exists {
-			tempClusterCounts[clusterName]++
-			conflict.clusterOld = clusterName
-			conflict.clusterNew = fmt.Sprintf("%s-%s", originalClusterName, source)
-			hasConflict = true
+		clusterObj := config.Clusters[originalClusterName]
+		userObj := config.AuthInfos[originalUserName]
+
+		// Проверяем кластер: конфликт только если имя занято ДРУГИМ содержимым.
+		if existing, exists := tempClusterObjs[clusterName]; exists {
+			if !cleaner.ClustersEqual(existing, clusterObj) {
+				tempClusterCounts[clusterName]++
+				conflict.clusterOld = clusterName
+				conflict.clusterNew = fmt.Sprintf("%s-%s", originalClusterName, source)
+				hasConflict = true
+			}
 		} else {
 			tempClusterCounts[clusterName] = 0
+			tempClusterObjs[clusterName] = clusterObj
 		}
 
 		// Проверяем пользователя
-		if _, exists := tempUserCounts[userName]; exists {
-			tempUserCounts[userName]++
-			conflict.userOld = userName
-			conflict.userNew = fmt.Sprintf("%s-%s", originalUserName, source)
-			hasConflict = true
+		if existing, exists := tempUserObjs[userName]; exists {
+			if !cleaner.UsersEqual(existing, userObj) {
+				tempUserCounts[userName]++
+				conflict.userOld = userName
+				conflict.userNew = fmt.Sprintf("%s-%s", originalUserName, source)
+				hasConflict = true
+			}
 		} else {
 			tempUserCounts[userName] = 0
+			tempUserObjs[userName] = userObj
 		}
 
 		// Проверяем контекст
-		if _, exists := tempContextCounts[contextName]; exists {
-			tempContextCounts[contextName]++
-			conflict.contextOld = contextName
-			conflict.contextNew = fmt.Sprintf("%s-%s", originalContextName, source)
-			hasConflict = true
+		if existing, exists := tempContextObjs[contextName]; exists {
+			if !contextsIdentical(existing, context) {
+				tempContextCounts[contextName]++
+				conflict.contextOld = contextName
+				conflict.contextNew = fmt.Sprintf("%s-%s", originalContextName, source)
+				hasConflict = true
+			}
 		} else {
 			tempContextCounts[contextName] = 0
+			tempContextObjs[contextName] = context
 		}
 
 		if hasConflict {
@@ -473,6 +552,11 @@ func (c *Composer) detectConflicts(config *clientcmdapi.Config, source, fullPath
 	c.clusterCounts = tempClusterCounts
 	c.userCounts = tempUserCounts
 	c.contextCounts = tempContextCounts
+
+	// Обновляем реестр увиденных объектов
+	c.clusterObjs = tempClusterObjs
+	c.userObjs = tempUserObjs
+	c.contextObjs = tempContextObjs
 }
 
 func (c *Composer) showConflictsAndAsk() bool {

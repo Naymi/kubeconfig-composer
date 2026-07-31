@@ -34,7 +34,7 @@ go install github.com/naymi/kubeconfig-composer@latest
 ### Command Structure (Cobra-based CLI)
 All commands are in `cmd/` directory:
 - `root.go` - Root command definition and Execute() function
-- `merge.go` - Merges multiple kubeconfig files with conflict resolution. Defaults output to `~/.kube/config`; backs up an existing output file before overwriting; `--cleanup` moves source files to trash after a successful merge
+- `merge.go` - Merges multiple kubeconfig files with conflict resolution. Defaults output to `~/.kube/config`; backs up an existing output file before overwriting; `--cleanup` moves source files to trash after a successful merge. **Idempotent:** an existing output file is loaded first as the merge base (its names win and are preserved) and excluded from the directory scan, and the merged result is content-deduped (`Composer.Dedupe`) before writing, so re-running merge does not accumulate duplicates
 - `list.go` - Lists all kubeconfig files found in a directory
 - `status.go` - Checks connectivity to clusters and displays status table
 - `cleanup.go` - Removes unreachable contexts and optionally deletes empty files
@@ -72,9 +72,9 @@ Kubeconfig cleanup utilities:
 When merging configs, the tool:
 1. Processes clusters and users first, creating name mappings
 2. Handles contexts last, using the mappings to update references
-3. On name conflicts, prompts user interactively with context about both conflicting items
-4. Suggests auto-generated names based on source filename
-5. Tracks all names across clusters, users, and contexts separately
+3. **Content-aware:** a name collision where the incoming item is byte-identical to the already-merged one (via `cleaner.ClustersEqual`/`UsersEqual`/`contextsIdentical`) is treated as the same item and reused silently — not a conflict. Only a same-name/different-content collision is a real conflict. This applies in both passes: `detectConflicts` (the prompt preview, tracked via `clusterObjs`/`userObjs`/`contextObjs`) and `mergeConfig` (the actual merge, checked against `mergedConfig`)
+4. On a real conflict, prompts user interactively (or auto-suffixes with `-y`), suggesting names based on source filename
+5. After merging, `Composer.Dedupe()` collapses any remaining content-identical entries that ended up under different names (the belt-and-suspenders step that makes re-runs idempotent)
 
 ### State Directory (`~/.kubeconfig-composer/`)
 The tool keeps its own working state outside the kube directory:

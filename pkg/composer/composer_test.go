@@ -62,6 +62,70 @@ func TestMergeConfig(t *testing.T) {
 	}
 }
 
+// makeConfig собирает одиночный конфиг для тестов идемпотентности.
+func makeConfig(ctx, cluster, user, server, token string) *clientcmdapi.Config {
+	cfg := clientcmdapi.NewConfig()
+	cfg.Clusters[cluster] = &clientcmdapi.Cluster{Server: server}
+	cfg.AuthInfos[user] = &clientcmdapi.AuthInfo{Token: token}
+	cfg.Contexts[ctx] = &clientcmdapi.Context{Cluster: cluster, AuthInfo: user}
+	return cfg
+}
+
+func TestMergeReusesIdenticalEntries(t *testing.T) {
+	// Два входа с идентичным содержимым под одинаковыми именами (например,
+	// существующий конфиг + тот же исходник) не должны плодить дубликаты.
+	c := New(true)
+	c.configs = []configWithSource{
+		{config: makeConfig("ctx", "c1", "u1", "https://x", "t"), source: "a", fullPath: "/a"},
+		{config: makeConfig("ctx", "c1", "u1", "https://x", "t"), source: "b", fullPath: "/b"},
+	}
+	if err := c.Merge(); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.mergedConfig.Clusters) != 1 || len(c.mergedConfig.AuthInfos) != 1 || len(c.mergedConfig.Contexts) != 1 {
+		t.Fatalf("идентичные записи должны переиспользоваться: clusters=%d users=%d contexts=%d",
+			len(c.mergedConfig.Clusters), len(c.mergedConfig.AuthInfos), len(c.mergedConfig.Contexts))
+	}
+}
+
+func TestMergeDedupeCollapsesRenamedDuplicates(t *testing.T) {
+	// Одинаковое содержимое под РАЗНЫМИ именами (как после прошлых merge)
+	// должно схлопнуться на шаге Dedupe.
+	c := New(true)
+	c.configs = []configWithSource{
+		{config: makeConfig("ctx", "c1", "u1", "https://x", "t"), source: "a", fullPath: "/a"},
+		{config: makeConfig("ctx-config", "c1-config", "u1-config", "https://x", "t"), source: "b", fullPath: "/b"},
+	}
+	if err := c.Merge(); err != nil {
+		t.Fatal(err)
+	}
+	c.Dedupe()
+	if len(c.mergedConfig.Contexts) != 1 {
+		t.Fatalf("контексты с одинаковой целью должны схлопнуться, got %d", len(c.mergedConfig.Contexts))
+	}
+	if len(c.mergedConfig.Clusters) != 1 || len(c.mergedConfig.AuthInfos) != 1 {
+		t.Fatalf("идентичные кластеры/пользователи должны схлопнуться: clusters=%d users=%d",
+			len(c.mergedConfig.Clusters), len(c.mergedConfig.AuthInfos))
+	}
+}
+
+func TestMergeKeepsGenuineConflicts(t *testing.T) {
+	// Одно имя, но РАЗНОЕ содержимое — это настоящий конфликт, записи должны
+	// сохраниться раздельно.
+	c := New(true)
+	c.configs = []configWithSource{
+		{config: makeConfig("ctx", "c1", "u1", "https://x", "t1"), source: "a", fullPath: "/a"},
+		{config: makeConfig("ctx", "c1", "u1", "https://y", "t2"), source: "b", fullPath: "/b"},
+	}
+	if err := c.Merge(); err != nil {
+		t.Fatal(err)
+	}
+	c.Dedupe()
+	if len(c.mergedConfig.Clusters) != 2 {
+		t.Fatalf("разные кластеры под одним именем должны остаться раздельными, got %d", len(c.mergedConfig.Clusters))
+	}
+}
+
 func TestIsKubeconfigFile(t *testing.T) {
 	tmpDir := t.TempDir()
 

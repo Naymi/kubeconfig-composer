@@ -219,6 +219,14 @@ func betterName(a, b string) bool {
 	return a < b
 }
 
+// ClustersEqual сообщает, идентичны ли два кластера по содержимому
+// (путь-источник LocationOfOrigin игнорируется). Экспортируется для merge,
+// чтобы распознавать одинаковые записи и не плодить дубликаты.
+func ClustersEqual(a, b *clientcmdapi.Cluster) bool { return clustersEqual(a, b) }
+
+// UsersEqual сообщает, идентичны ли два пользователя по содержимому.
+func UsersEqual(a, b *clientcmdapi.AuthInfo) bool { return usersEqual(a, b) }
+
 func clustersEqual(a, b *clientcmdapi.Cluster) bool {
 	if a == nil || b == nil {
 		return a == b
