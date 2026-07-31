@@ -1,0 +1,87 @@
+# https://taskfile.dev
+version: '3'
+
+vars:
+  BINARY: kubeconfig-composer
+  PKG: github.com/naymi/kubeconfig-composer
+
+tasks:
+  default:
+    desc: Показать список доступных задач
+    cmds:
+      - task --list
+    silent: true
+
+  build:
+    desc: Собрать бинарник
+    cmds:
+      - go build -o {{.BINARY}} .
+    sources:
+      - '**/*.go'
+      - go.mod
+      - go.sum
+    generates:
+      - '{{.BINARY}}'
+
+  run:
+    desc: 'Запустить без сборки: task run -- <команда> [флаги]'
+    cmds:
+      - go run . {{.CLI_ARGS}}
+
+  install:
+    desc: Установить бинарник в GOPATH/bin
+    cmds:
+      - go install .
+
+  test:
+    desc: Прогнать все тесты
+    cmds:
+      - go test ./...
+
+  test:verbose:
+    desc: Прогнать все тесты с подробным выводом
+    cmds:
+      - go test ./... -v
+
+  test:pkg:
+    desc: 'Тесты одного пакета: task test:pkg -- ./pkg/composer'
+    cmds:
+      - go test {{.CLI_ARGS}} -v
+
+  cover:
+    desc: Тесты с отчётом о покрытии (coverage.out + HTML)
+    cmds:
+      - go test ./... -coverprofile=coverage.out
+      - go tool cover -func=coverage.out
+
+  vet:
+    desc: Статический анализ go vet
+    cmds:
+      - go vet ./...
+
+  fmt:
+    desc: Отформатировать код
+    cmds:
+      - gofmt -w .
+
+  fmt:check:
+    desc: Проверить форматирование (падает, если есть неотформатированные файлы)
+    cmds:
+      - test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+
+  tidy:
+    desc: Привести в порядок go.mod/go.sum
+    cmds:
+      - go mod tidy
+
+  check:
+    desc: Полная проверка перед коммитом (fmt-check, vet, test)
+    cmds:
+      - task: fmt:check
+      - task: vet
+      - task: test
+
+  clean:
+    desc: Удалить артефакты сборки
+    cmds:
+      - rm -f {{.BINARY}} coverage.out

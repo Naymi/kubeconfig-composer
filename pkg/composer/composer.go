@@ -44,14 +44,14 @@ type Composer struct {
 }
 
 type conflictResolution struct {
-	configName  string // имя конфига (источника)
-	clusterOld  string
-	clusterNew  string
-	userOld     string
-	userNew     string
-	contextOld  string
-	contextNew  string
-	source      string
+	configName string // имя конфига (источника)
+	clusterOld string
+	clusterNew string
+	userOld    string
+	userNew    string
+	contextOld string
+	contextNew string
+	source     string
 }
 
 type nameSource struct {
@@ -716,4 +716,3 @@ func (c *Composer) ShowAppliedChanges() {
 	table.Render()
 	fmt.Println()
 }
-

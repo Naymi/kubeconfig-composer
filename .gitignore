@@ -15,6 +15,12 @@ merged-config
 # Go workspace file
 go.work
 
+# Task runner cache
+.task/
+
+# Coverage
+coverage.out
+
 # IDE
 .idea/
 .vscode/
