@@ -234,6 +234,15 @@ func clustersEqual(a, b *clientcmdapi.Cluster) bool {
 	x, y := a.DeepCopy(), b.DeepCopy()
 	// LocationOfOrigin хранит путь к исходному файлу и не относится к содержимому.
 	x.LocationOfOrigin, y.LocationOfOrigin = "", ""
+	// После чтения из файла Extensions становится пустой (не nil) картой —
+	// нормализуем, иначе объект, только что загруженный с диска, и объект,
+	// собранный в памяти, различались бы без реальной причины.
+	if len(x.Extensions) == 0 {
+		x.Extensions = nil
+	}
+	if len(y.Extensions) == 0 {
+		y.Extensions = nil
+	}
 	return reflect.DeepEqual(x, y)
 }
 
@@ -243,6 +252,12 @@ func usersEqual(a, b *clientcmdapi.AuthInfo) bool {
 	}
 	x, y := a.DeepCopy(), b.DeepCopy()
 	x.LocationOfOrigin, y.LocationOfOrigin = "", ""
+	if len(x.Extensions) == 0 {
+		x.Extensions = nil
+	}
+	if len(y.Extensions) == 0 {
+		y.Extensions = nil
+	}
 	return reflect.DeepEqual(x, y)
 }
 

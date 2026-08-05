@@ -3,6 +3,7 @@ package cleaner
 import (
 	"testing"
 
+	"k8s.io/apimachinery/pkg/runtime"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
@@ -129,6 +130,25 @@ func TestDedupeRemovesUnusedClustersAndUsers(t *testing.T) {
 	}
 	if len(report.RemovedUsers) == 0 {
 		t.Errorf("ожидалось сообщение об удалённом пользователе")
+	}
+}
+
+func TestClustersUsersEqualIgnoreEmptyVsNilExtensions(t *testing.T) {
+	// После чтения из файла (clientcmd.LoadFromFile) Extensions становится
+	// пустой (не nil) картой, даже если в файле их не было. Кластер/пользователь
+	// без Extensions вообще (nil) и такой же, но с пустой картой, должны
+	// считаться идентичными — иначе только что загруженный с диска объект и
+	// собранный в памяти отличались бы без реальной причины в содержимом.
+	clusterNil := &clientcmdapi.Cluster{Server: "https://x"}
+	clusterEmpty := &clientcmdapi.Cluster{Server: "https://x", Extensions: map[string]runtime.Object{}}
+	if !ClustersEqual(clusterNil, clusterEmpty) {
+		t.Error("кластеры с nil и пустой (не nil) картой Extensions должны считаться идентичными")
+	}
+
+	userNil := &clientcmdapi.AuthInfo{Token: "t"}
+	userEmpty := &clientcmdapi.AuthInfo{Token: "t", Extensions: map[string]runtime.Object{}}
+	if !UsersEqual(userNil, userEmpty) {
+		t.Error("пользователи с nil и пустой (не nil) картой Extensions должны считаться идентичными")
 	}
 }
 

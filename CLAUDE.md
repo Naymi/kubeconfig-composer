@@ -34,7 +34,7 @@ go install github.com/naymi/kubeconfig-composer@latest
 ### Command Structure (Cobra-based CLI)
 All commands are in `cmd/` directory:
 - `root.go` - Root command definition and Execute() function
-- `merge.go` - Merges multiple kubeconfig files with conflict resolution. Defaults output to `~/.kube/config`; backs up an existing output file before overwriting; `--cleanup` moves source files to trash after a successful merge. **Idempotent:** an existing output file is loaded first as the merge base (its names win and are preserved) and excluded from the directory scan, and the merged result is content-deduped (`Composer.Dedupe`) before writing, so re-running merge does not accumulate duplicates
+- `merge.go` - Merges multiple kubeconfig files with conflict resolution. Defaults output to `~/.kube/config`; backs up an existing output file before overwriting; `--cleanup` moves source files to trash after a successful merge. Every merged cluster/user/context is named `<prefix>:<name>:<path-from---dir>` (prefix defaults to `kc`, `--prefix` configurable); a name that's a common placeholder (`local`, `user`, `default`, `kubernetes-admin`, etc. — see `isGenericName`) is replaced with the source filename instead of kept. **Idempotent:** an existing output file is loaded first as the merge base (its names win and are preserved) and excluded from the directory scan, the merged result is content-deduped (`Composer.Dedupe`) before writing, and `Composer.OutputUnchanged`/`ContextDiff` skip the write+prompt entirely (exit 0) when nothing actually changed
 - `list.go` - Lists all kubeconfig files found in a directory
 - `status.go` - Checks connectivity to clusters and displays status table
 - `cleanup.go` - Removes unreachable contexts and optionally deletes empty files
@@ -49,7 +49,8 @@ Main merging logic:
 - `ScanDirectory()` - Recursively finds kubeconfig files
 - `LoadFiles()` - Loads specific kubeconfig files
 - `Merge()` - Merges all loaded configs with conflict resolution
-- `getUniqueName()` - Handles name conflicts interactively, prompting user for custom names or auto-generating suffixes
+- `effectiveName()` - Builds every entity's `<prefix>:<name>:<path>` name (naming.go has `isGenericName`/placeholder detection); a name already starting with `<prefix>:` is left untouched (structural "already finalized" marker — required for idempotency since the current run's own path differs from the source path baked into a reloaded name)
+- `getUniqueName()` - Rare fallback for genuine same-name/different-content collisions; numeric `_N` suffix normally, interactive prompt/`-source` suffix only for names not yet in `<prefix>:...` form
 
 #### `pkg/scanner`
 File scanning utilities:
@@ -72,8 +73,8 @@ Kubeconfig cleanup utilities:
 When merging configs, the tool:
 1. Processes clusters and users first, creating name mappings
 2. Handles contexts last, using the mappings to update references
-3. **Content-aware:** a name collision where the incoming item is byte-identical to the already-merged one (via `cleaner.ClustersEqual`/`UsersEqual`/`contextsIdentical`) is treated as the same item and reused silently — not a conflict. Only a same-name/different-content collision is a real conflict. This applies in both passes: `detectConflicts` (the prompt preview, tracked via `clusterObjs`/`userObjs`/`contextObjs`) and `mergeConfig` (the actual merge, checked against `mergedConfig`)
-4. On a real conflict, prompts user interactively (or auto-suffixes with `-y`), suggesting names based on source filename
+3. **Content-aware, never name-based:** equality is always resolved-content comparison, never a name-string comparison — `cleaner.ClustersEqual`/`UsersEqual` (ignore `LocationOfOrigin` and normalize empty-vs-nil `Extensions`), and `contextsSameContent` (resolves a context's `Cluster`/`AuthInfo` name to the actual object before comparing, so a cluster renamed between runs with unchanged content isn't a false conflict). A content match reuses the existing name silently — not a conflict. This applies in both passes: `detectConflicts` (the prompt preview) and `mergeConfig` (the actual merge)
+4. Every entity name is built by `effectiveName()` as `<prefix>:<name-or-filename>:<path>` (see merge.go bullet above) — a genuine same-name/different-content collision is rare (only when two files resolve to the identical prefix:name:path) and falls back to a numeric `_N` suffix, or the old interactive prompt/`-source` suffix if the name was already finalized from a prior run
 5. After merging, `Composer.Dedupe()` collapses any remaining content-identical entries that ended up under different names (the belt-and-suspenders step that makes re-runs idempotent)
 
 ### State Directory (`~/.kubeconfig-composer/`)
@@ -132,6 +133,9 @@ Key dependencies:
 - The tool protects `~/.kube/config` from deletion (only cleans contexts, never deletes the file)
 - Interactive prompts are used for conflict resolution during merge
 - Timeout defaults to 3 seconds for cluster connectivity checks
+- **Rebuild before testing manually:** `go build -o kubeconfig-composer .` — the user runs the compiled binary directly, not `go run .`; an unrebuilt binary after source changes looks identical to a real bug
+- **`reflect.DeepEqual` gotcha:** after `clientcmd.Write`+`LoadFromFile`, `Extensions` becomes an empty non-nil map instead of `nil` — normalize (treat `len == 0` as equal) before any `reflect.DeepEqual` comparison of loaded-vs-in-memory kubeconfig objects
+- **Testing `merge`'s interactive prompts non-interactively:** pipe `< /dev/null` (to hit the EOF/error path) or run in background with `sleep`+`kill` after the prompt appears — don't let it block
 
 
 ## grepai - Semantic Code Search

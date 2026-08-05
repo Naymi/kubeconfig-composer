@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/naymi/kubeconfig-composer/pkg/cleaner"
@@ -41,6 +42,12 @@ type Composer struct {
 	contextObjs map[string]*clientcmdapi.Context
 	autoAccept  bool
 	conflicts   []conflictResolution
+	// baseDir — директория (--dir), относительно которой путь к файлу
+	// добавляется в имя сущности (см. SetBaseDir, relativeSourcePath).
+	baseDir string
+	// namePrefix добавляется перед именем каждой смерженной из файла сущности
+	// (см. SetNamePrefix), например "kc:prod (nested/config.yaml)".
+	namePrefix string
 }
 
 type conflictResolution struct {
@@ -60,6 +67,11 @@ type nameSource struct {
 	itemName string // оригинальное имя элемента
 }
 
+// DefaultNamePrefix — префикс по умолчанию в имени каждой смерженной из
+// файла сущности (см. SetNamePrefix), формат "<prefix>:<имя>:<путь>".
+// Настраивается флагом --prefix команды merge.
+const DefaultNamePrefix = "kc"
+
 func New(autoAccept bool) *Composer {
 	return &Composer{
 		configs:        make([]configWithSource, 0),
@@ -74,7 +86,76 @@ func New(autoAccept bool) *Composer {
 		contextObjs:    make(map[string]*clientcmdapi.Context),
 		autoAccept:     autoAccept,
 		conflicts:      make([]conflictResolution, 0),
+		namePrefix:     DefaultNamePrefix,
 	}
+}
+
+// SetBaseDir задаёт директорию (--dir), относительно которой путь к файлу
+// добавляется в имя сущности — вместо абсолютного пути файловой системы,
+// который был бы бесполезен на другой машине/у другого пользователя.
+func (c *Composer) SetBaseDir(dir string) {
+	c.baseDir = dir
+}
+
+// SetNamePrefix задаёт префикс, который добавляется перед именем каждой
+// смерженной из файла сущности (кластера/пользователя/контекста). Пустая
+// строка отключает префикс.
+func (c *Composer) SetNamePrefix(prefix string) {
+	c.namePrefix = prefix
+}
+
+// relativeSourcePath переводит абсолютный путь файла в путь относительно
+// baseDir. Если baseDir не задан или путь не удаётся сделать относительным,
+// возвращает исходный абсолютный путь как есть.
+func (c *Composer) relativeSourcePath(fullPath string) string {
+	if c.baseDir == "" {
+		return fullPath
+	}
+	absBase, err := filepath.Abs(c.baseDir)
+	if err != nil {
+		return fullPath
+	}
+	rel, err := filepath.Rel(absBase, fullPath)
+	if err != nil {
+		return fullPath
+	}
+	return rel
+}
+
+// effectiveName возвращает имя, которое реально используется для сущности
+// (кластера, пользователя или контекста) при merge, в формате
+// "<prefix>:<имя>:<путь>" (если namePrefix пустой — просто "<имя>:<путь>"):
+//   - <имя> — исходное имя сущности; если оно типовое (isGenericName) и не
+//     несёт смысла (default, kubernetes-admin, local, user, ...), вместо него
+//     подставляется имя файла-источника без расширения (source);
+//   - <путь> — путь к файлу-источнику относительно --dir
+//     (см. SetBaseDir/relativeSourcePath).
+//
+// Например: "kc:prod:nested/config.yaml" (осмысленное имя) или
+// "kc:satellite03:satellite03.conf" (типовое имя заменено на файл). Второе
+// возвращаемое значение — была ли произведена подстановка (нужно, чтобы при
+// конфликте использовать числовой суффикс "_N", а не "-source").
+//
+// Если namePrefix задан и имя уже начинается с "<prefix>:", значит оно уже
+// было подставлено на прошлом merge (запись перезагружена из ранее
+// записанного output) — трогать повторно не нужно, иначе префикс наслаивался
+// бы на каждом запуске, ломая идемпотентность. Если namePrefix пустой,
+// такого надёжного маркера нет — на перезагрузке базового файла запись может
+// транзитно задвоиться, но Composer.Dedupe(), которым merge всегда завершает
+// пайплайн, схлопывает дубли обратно по содержимому.
+func (c *Composer) effectiveName(name, source, fullPath string) (string, bool) {
+	if c.namePrefix != "" && strings.HasPrefix(name, c.namePrefix+":") {
+		return name, false
+	}
+	entity := name
+	if isGenericName(name) {
+		entity = source
+	}
+	relPath := c.relativeSourcePath(fullPath)
+	if c.namePrefix == "" {
+		return fmt.Sprintf("%s:%s", entity, relPath), true
+	}
+	return fmt.Sprintf("%s:%s:%s", c.namePrefix, entity, relPath), true
 }
 
 func (c *Composer) LoadFiles(files []string) error {
@@ -246,28 +327,31 @@ func (c *Composer) mergeConfig(config *clientcmdapi.Config, source, fullPath str
 	userMapping := make(map[string]string)
 
 	for name, cluster := range config.Clusters {
+		effName, generic := c.effectiveName(name, source, fullPath)
 		// Если под этим именем уже лежит идентичный кластер — это повторное
 		// включение того же самого, переиспользуем без суффикса.
-		if existing, ok := c.mergedConfig.Clusters[name]; ok && cleaner.ClustersEqual(existing, cluster) {
-			clusterMapping[name] = name
+		if existing, ok := c.mergedConfig.Clusters[effName]; ok && cleaner.ClustersEqual(existing, cluster) {
+			clusterMapping[name] = effName
 			continue
 		}
-		uniqueName := c.getUniqueName(name, "cluster", source, fullPath, name)
+		uniqueName := c.getUniqueName(effName, "cluster", source, fullPath, name, generic)
 		c.mergedConfig.Clusters[uniqueName] = cluster
 		clusterMapping[name] = uniqueName
 	}
 
 	for name, authInfo := range config.AuthInfos {
-		if existing, ok := c.mergedConfig.AuthInfos[name]; ok && cleaner.UsersEqual(existing, authInfo) {
-			userMapping[name] = name
+		effName, generic := c.effectiveName(name, source, fullPath)
+		if existing, ok := c.mergedConfig.AuthInfos[effName]; ok && cleaner.UsersEqual(existing, authInfo) {
+			userMapping[name] = effName
 			continue
 		}
-		uniqueName := c.getUniqueName(name, "user", source, fullPath, name)
+		uniqueName := c.getUniqueName(effName, "user", source, fullPath, name, generic)
 		c.mergedConfig.AuthInfos[uniqueName] = authInfo
 		userMapping[name] = uniqueName
 	}
 
 	// Затем обрабатываем контексты, используя уже созданный маппинг
+	contextMapping := make(map[string]string)
 	for name, context := range config.Contexts {
 		newContext := context.DeepCopy()
 		// Используем маппинг вместо повторного вызова getUniqueName
@@ -278,20 +362,41 @@ func (c *Composer) mergeConfig(config *clientcmdapi.Config, source, fullPath str
 			newContext.AuthInfo = mappedUser
 		}
 
-		// Если под этим именем уже лежит идентичный контекст — переиспользуем.
-		if existing, ok := c.mergedConfig.Contexts[name]; ok && contextsIdentical(existing, newContext) {
+		effName, generic := c.effectiveName(name, source, fullPath)
+		// Если под этим именем уже лежит контекст с тем же содержимым
+		// (кластер/пользователь/namespace) — переиспользуем.
+		if existing, ok := c.mergedConfig.Contexts[effName]; ok && contextsSameContent(existing, newContext, c.mergedConfig.Clusters, c.mergedConfig.AuthInfos) {
+			contextMapping[name] = effName
 			continue
 		}
 
-		uniqueName := c.getUniqueName(name, "context", source, fullPath, name)
+		uniqueName := c.getUniqueName(effName, "context", source, fullPath, name, generic)
 		c.mergedConfig.Contexts[uniqueName] = newContext
+		contextMapping[name] = uniqueName
+	}
+
+	// current-context из исходного файла переносим на итоговое имя контекста;
+	// побеждает первый источник, где current-context задан (обычно это база —
+	// уже существующий output, обрабатываемый первым), последующие файлы его
+	// не перезаписывают.
+	if config.CurrentContext != "" && c.mergedConfig.CurrentContext == "" {
+		if mapped, ok := contextMapping[config.CurrentContext]; ok {
+			c.mergedConfig.CurrentContext = mapped
+		}
 	}
 }
 
-// contextsIdentical сравнивает контексты по цели (кластер, пользователь,
-// namespace) с уже применённым маппингом имён.
-func contextsIdentical(a, b *clientcmdapi.Context) bool {
-	return a.Cluster == b.Cluster && a.AuthInfo == b.AuthInfo && a.Namespace == b.Namespace
+// contextsSameContent сравнивает контексты не по строкам-именам кластера и
+// пользователя, а по содержимому, на которое эти имена ссылаются (плюс
+// namespace). Так дрейф имени — например, кластер посчитан под чуть другим
+// путём, чем в прошлый раз, но сам сервер/сертификат не изменились — не
+// считается конфликтом: если контент идентичен, запись не трогаем.
+func contextsSameContent(a, b *clientcmdapi.Context, clusters map[string]*clientcmdapi.Cluster, users map[string]*clientcmdapi.AuthInfo) bool {
+	if a.Namespace != b.Namespace {
+		return false
+	}
+	return cleaner.ClustersEqual(clusters[a.Cluster], clusters[b.Cluster]) &&
+		cleaner.UsersEqual(users[a.AuthInfo], users[b.AuthInfo])
 }
 
 // Dedupe схлопывает в итоговом конфиге записи, идентичные по содержимому, но
@@ -303,12 +408,15 @@ func (c *Composer) Dedupe() *cleaner.DedupeReport {
 	return report
 }
 
-func (c *Composer) getUniqueName(name, prefix, source, fullPath, originalItemName string) string {
-	// Если имя "Default", используем имя файла
+// getUniqueName подбирает уникальное имя для сущности. name уже прошло через
+// effectiveName (типовые имена вроде "default"/"kubernetes-admin" заменены на
+// путь к файлу вызывающей стороной). useNumericSuffix — true, если такая
+// замена была произведена: тогда при конфликте используется числовой суффикс
+// "_N" вместо обычного "-source", т.к. у подставленного имени нет
+// "оригинального" короткого варианта, к которому имеет смысл приписывать имя
+// файла ещё раз.
+func (c *Composer) getUniqueName(name, prefix, source, fullPath, originalItemName string, useNumericSuffix bool) string {
 	originalName := name
-	if strings.ToLower(name) == "default" {
-		name = source
-	}
 
 	// Выбираем правильные мапы в зависимости от типа элемента
 	var counts map[string]int
@@ -343,8 +451,14 @@ func (c *Composer) getUniqueName(name, prefix, source, fullPath, originalItemNam
 
 	firstSource := sources[name]
 
-	// Формируем предложение на основе имени файла
-	suggestedName := fmt.Sprintf("%s-%s", originalItemName, source)
+	// Формируем предложение: числовой суффикс для подставленных путём имён,
+	// иначе — на основе имени файла.
+	var suggestedName string
+	if useNumericSuffix {
+		suggestedName = fmt.Sprintf("%s_%d", name, counts[name])
+	} else {
+		suggestedName = fmt.Sprintf("%s-%s", originalItemName, source)
+	}
 
 	// Если включен режим автоматического принятия
 	if c.autoAccept {
@@ -361,7 +475,7 @@ func (c *Composer) getUniqueName(name, prefix, source, fullPath, originalItemNam
 			return suggestedName
 		}
 		// Если занято, используем числовой суффикс
-		finalName := fmt.Sprintf("%s-%d", name, counts[name])
+		finalName := numberedName(name, counts[name], useNumericSuffix)
 		counts[finalName] = 0
 		sources[finalName] = nameSource{
 			filePath: fullPath,
@@ -398,7 +512,7 @@ func (c *Composer) getUniqueName(name, prefix, source, fullPath, originalItemNam
 			}
 			return suggestedName
 		}
-		return fmt.Sprintf("%s-%d", name, counts[name])
+		return numberedName(name, counts[name], useNumericSuffix)
 	}
 
 	counts[customName] = 0
@@ -421,6 +535,76 @@ func (c *Composer) WriteOutput(path string) error {
 	}
 
 	return nil
+}
+
+// OutputUnchanged сообщает, совпадает ли результат текущего merge с уже
+// записанным по пути path файлом по содержимому (имена и наборы
+// кластеров/пользователей/контекстов, current-context) — чтобы не
+// перезаписывать файл и не создавать бэкап, если по факту ничего не
+// изменилось.
+func (c *Composer) OutputUnchanged(path string) (bool, error) {
+	existing, err := clientcmd.LoadFromFile(path)
+	if err != nil {
+		return false, fmt.Errorf("failed to load existing config: %w", err)
+	}
+	return configsEqual(existing, c.mergedConfig), nil
+}
+
+// ContextDiff возвращает имена контекстов, которые появятся (added) и
+// исчезнут (removed) в результате merge по сравнению с уже записанным по
+// пути path файлом — чтобы перед перезаписью явно показать пользователю,
+// что именно изменится. Оба среза отсортированы для детерминированного вывода.
+func (c *Composer) ContextDiff(path string) (added, removed []string, err error) {
+	existing, err := clientcmd.LoadFromFile(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to load existing config: %w", err)
+	}
+	for name := range c.mergedConfig.Contexts {
+		if _, ok := existing.Contexts[name]; !ok {
+			added = append(added, name)
+		}
+	}
+	for name := range existing.Contexts {
+		if _, ok := c.mergedConfig.Contexts[name]; !ok {
+			removed = append(removed, name)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	return added, removed, nil
+}
+
+// configsEqual сравнивает два конфига по содержимому: одинаковые имена и
+// содержимое кластеров/пользователей (без учёта LocationOfOrigin — он лишь
+// отражает, из какого файла объект был загружен, и не относится к
+// содержимому), контексты — по ссылкам на кластер/пользователя и namespace,
+// плюс current-context.
+func configsEqual(a, b *clientcmdapi.Config) bool {
+	if a.CurrentContext != b.CurrentContext {
+		return false
+	}
+	if len(a.Clusters) != len(b.Clusters) || len(a.AuthInfos) != len(b.AuthInfos) || len(a.Contexts) != len(b.Contexts) {
+		return false
+	}
+	for name, cluster := range a.Clusters {
+		other, ok := b.Clusters[name]
+		if !ok || !cleaner.ClustersEqual(cluster, other) {
+			return false
+		}
+	}
+	for name, user := range a.AuthInfos {
+		other, ok := b.AuthInfos[name]
+		if !ok || !cleaner.UsersEqual(user, other) {
+			return false
+		}
+	}
+	for name, ctx := range a.Contexts {
+		other, ok := b.Contexts[name]
+		if !ok || ctx.Cluster != other.Cluster || ctx.AuthInfo != other.AuthInfo || ctx.Namespace != other.Namespace {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Composer) GetLoadedFiles() []configWithSource {
@@ -473,21 +657,15 @@ func (c *Composer) detectConflicts(config *clientcmdapi.Config, source, fullPath
 	// Проверяем контексты и связанные кластеры/пользователей
 	for contextName, context := range config.Contexts {
 		originalContextName := contextName
-		if strings.ToLower(contextName) == "default" {
-			contextName = source
-		}
+		contextName, contextGeneric := c.effectiveName(contextName, source, fullPath)
 
 		clusterName := context.Cluster
 		originalClusterName := clusterName
-		if strings.ToLower(clusterName) == "default" {
-			clusterName = source
-		}
+		clusterName, clusterGeneric := c.effectiveName(clusterName, source, fullPath)
 
 		userName := context.AuthInfo
 		originalUserName := userName
-		if strings.ToLower(userName) == "default" {
-			userName = source
-		}
+		userName, userGeneric := c.effectiveName(userName, source, fullPath)
 
 		conflict := &conflictResolution{
 			configName: source,
@@ -504,7 +682,7 @@ func (c *Composer) detectConflicts(config *clientcmdapi.Config, source, fullPath
 			if !cleaner.ClustersEqual(existing, clusterObj) {
 				tempClusterCounts[clusterName]++
 				conflict.clusterOld = clusterName
-				conflict.clusterNew = fmt.Sprintf("%s-%s", originalClusterName, source)
+				conflict.clusterNew = numberedName(clusterName, tempClusterCounts[clusterName], clusterGeneric)
 				hasConflict = true
 			}
 		} else {
@@ -517,7 +695,7 @@ func (c *Composer) detectConflicts(config *clientcmdapi.Config, source, fullPath
 			if !cleaner.UsersEqual(existing, userObj) {
 				tempUserCounts[userName]++
 				conflict.userOld = userName
-				conflict.userNew = fmt.Sprintf("%s-%s", originalUserName, source)
+				conflict.userNew = numberedName(userName, tempUserCounts[userName], userGeneric)
 				hasConflict = true
 			}
 		} else {
@@ -525,17 +703,26 @@ func (c *Composer) detectConflicts(config *clientcmdapi.Config, source, fullPath
 			tempUserObjs[userName] = userObj
 		}
 
-		// Проверяем контекст
+		// Проверяем контекст: сравниваем по содержимому кластера/пользователя,
+		// на которые он ссылается (contextsSameContent), а не по строкам-именам
+		// — иначе дрейф имени (например, кластер посчитан под чуть другим
+		// путём, чем в прошлый раз) ошибочно считался бы конфликтом, даже если
+		// сервер/сертификат не изменились.
+		remappedContext := &clientcmdapi.Context{
+			Cluster:   clusterName,
+			AuthInfo:  userName,
+			Namespace: context.Namespace,
+		}
 		if existing, exists := tempContextObjs[contextName]; exists {
-			if !contextsIdentical(existing, context) {
+			if !contextsSameContent(existing, remappedContext, tempClusterObjs, tempUserObjs) {
 				tempContextCounts[contextName]++
 				conflict.contextOld = contextName
-				conflict.contextNew = fmt.Sprintf("%s-%s", originalContextName, source)
+				conflict.contextNew = numberedName(contextName, tempContextCounts[contextName], contextGeneric)
 				hasConflict = true
 			}
 		} else {
 			tempContextCounts[contextName] = 0
-			tempContextObjs[contextName] = context
+			tempContextObjs[contextName] = remappedContext
 		}
 
 		if hasConflict {
