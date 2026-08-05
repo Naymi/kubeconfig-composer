@@ -25,6 +25,10 @@ jobs:
           pre_release_branches: test-release
           append_to_pre_release_tag: alpha
 
+      - name: Fetch new tag
+        if: steps.tag.outputs.new_tag != ''
+        run: git fetch --tags origin
+
       - name: Set up Go
         if: steps.tag.outputs.new_tag != ''
         uses: actions/setup-go@v5
