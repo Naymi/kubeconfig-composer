@@ -16,7 +16,9 @@ task build        # go build -o kubeconfig-composer .
 task run -- merge # go run . merge
 task test         # go test ./...
 task test:pkg -- ./pkg/composer   # tests of one package, verbose
-task check        # fmt:check + vet + test; run before committing
+task test:install # tests of install.sh against a local HTTP server (needs python3)
+task lint:sh      # shellcheck for install.sh and scripts/ (skipped if shellcheck is missing)
+task check        # fmt:check + vet + test + lint:sh + test:install; run before committing
 task install      # go install .
 task --list       # all tasks
 ```
@@ -71,6 +73,12 @@ When merging configs, the tool:
 3. **Content-aware, never name-based:** equality is always resolved-content comparison, never a name-string comparison — `cleaner.ClustersEqual`/`UsersEqual` (ignore `LocationOfOrigin` and normalize empty-vs-nil `Extensions`), and `contextsSameContent` (resolves a context's `Cluster`/`AuthInfo` name to the actual object before comparing, so a cluster renamed between runs with unchanged content isn't a false conflict). A content match reuses the existing name silently — not a conflict. This applies in both passes: `detectConflicts` (the prompt preview) and `mergeConfig` (the actual merge)
 4. Every entity name is built by `effectiveName()` as `<prefix>:<name-or-filename>:<path>` (see merge.go bullet above) — a genuine same-name/different-content collision is rare (only when two files resolve to the identical prefix:name:path) and falls back to a numeric `_N` suffix, or the old interactive prompt/`-source` suffix if the name was already finalized from a prior run
 5. After merging, `Composer.Dedupe()` collapses any remaining content-identical entries that ended up under different names (the belt-and-suspenders step that makes re-runs idempotent)
+
+### Installation and Releases
+- `install.sh` (repo root) installs/updates the binary from GitHub Releases: picks the version (`KC_VERSION`, else `KC_CHANNEL=stable` → `releases/latest`, `alpha` → newest release including prereleases), verifies sha256 from `checksums.txt`, installs atomically into `KC_INSTALL_DIR` (default `~/.local/bin`), and exits early if `--version` of the installed binary already matches. It expects GoReleaser's default archive name `<project>_<version>_<os>_<arch>.tar.gz` — don't change the archive `name_template`.
+- `install.sh` is attached to every release (`release.extra_files` and `checksum.extra_files` in `.goreleaser.yaml`); the README points at `releases/latest/download/install.sh`, which returns 404 until the first non-prerelease exists.
+- `scripts/install_test.sh` tests it offline: `KC_API_URL`/`KC_DOWNLOAD_URL` point at a local `python3 -m http.server`.
+- `--version` comes from `cmd.version`, injected by GoReleaser via ldflags; local builds report `dev`.
 
 ### State Directory (`~/.kubeconfig-composer/`)
 The tool keeps its own working state outside the kube directory:

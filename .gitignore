@@ -34,3 +34,6 @@ coverage.out
 
 # Temporary files
 .tmp/
+
+# GoReleaser output
+dist/

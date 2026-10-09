@@ -6,6 +6,8 @@ builds:
     main: .
     env:
       - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X github.com/naymi/kubeconfig-composer/cmd.version={{.Version}}
     goos:
       - linux
       - darwin
@@ -23,6 +25,8 @@ archives:
 
 checksum:
   name_template: "checksums.txt"
+  extra_files:
+    - glob: install.sh
 
 changelog:
   use: github
@@ -38,3 +42,5 @@ changelog:
 
 release:
   prerelease: auto
+  extra_files:
+    - glob: install.sh
