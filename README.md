@@ -145,12 +145,12 @@ kubeconfig-composer revert --output ~/.kube/merged-config
 Файлы в `~/.kube`:
 
 - `dev/config` с контекстом `prod`
-- `satellite03.conf` с контекстом `default`
+- `staging.conf` с контекстом `default`
 
 Результат:
 
 - `kc:prod:dev/config`
-- `kc:satellite03:satellite03.conf`
+- `kc:staging:staging.conf`
 
 Если два разных по содержимому объекта получили одно и то же имя (редкий случай, когда у двух файлов совпали и имя, и путь), второй получает числовой суффикс `_N`.
 

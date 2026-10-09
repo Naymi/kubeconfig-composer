@@ -47,7 +47,7 @@ var mergeCmd = &cobra.Command{
 
   # Задать свой префикс имён (по умолчанию "kc"), пустая строка отключает его.
   # Имя каждой сущности строится как "<префикс>:<имя>:<путь-от---dir>",
-  # например "kc:prod:nested/config.yaml" или "kc:satellite03:satellite03.conf"
+  # например "kc:prod:nested/config.yaml" или "kc:staging:staging.conf"
   kubeconfig-composer merge --prefix "src"`,
 	RunE: runMerge,
 }
