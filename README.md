@@ -4,6 +4,30 @@ CLI-утилита, которая собирает kubeconfig файлы из �
 
 ## Установка
 
+Через curl (Linux и macOS, amd64 и arm64). Скрипт приложен к каждому релизу: он скачивает бинарник из GitHub Releases, проверяет sha256 и кладёт его в `~/.local/bin`:
+
+```bash
+curl -fsSL https://github.com/Naymi/kubeconfig-composer/releases/latest/download/install.sh | sh
+```
+
+Эта ссылка ведёт на последний стабильный релиз. Пока в релизах только alpha-пререлизы, она отвечает 404 (GitHub не считает пререлиз за latest). Тогда возьмите скрипт из нужного релиза по тегу со [страницы Releases](https://github.com/Naymi/kubeconfig-composer/releases) и выберите канал alpha:
+
+```bash
+curl -fsSL https://github.com/Naymi/kubeconfig-composer/releases/download/<тег>/install.sh | KC_CHANNEL=alpha sh
+```
+
+Те же команды обновляют уже установленную версию; если она актуальна, скрипт ничего не меняет.
+
+| Переменная | Значение |
+|---|---|
+| `KC_CHANNEL` | `stable` (по умолчанию) или `alpha` |
+| `KC_VERSION` | конкретная версия, например `v0.0.2-alpha.1`; приоритетнее канала |
+| `KC_INSTALL_DIR` | каталог установки, по умолчанию `~/.local/bin` |
+
+Если `~/.local/bin` нет в `PATH`, скрипт напечатает, что добавить в профиль оболочки. Установленную версию показывает `kubeconfig-composer --version`.
+
+Или через Go:
+
 ```bash
 go install github.com/naymi/kubeconfig-composer@latest
 ```
@@ -16,7 +40,7 @@ cd kubeconfig-composer
 go build -o kubeconfig-composer
 ```
 
-Готовые бинарники для linux, darwin и windows (amd64, arm64) публикуются на странице Releases репозитория. Сейчас это alpha-пререлизы.
+Бинарники для windows (amd64, arm64) тоже лежат на странице Releases, но скрипт их не ставит: скачайте zip вручную.
 
 ## Команды
 
