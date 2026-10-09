@@ -1,29 +1,23 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for AI coding agents working in this repository. User-facing documentation is in `README.md`.
 
 ## Project Overview
 
-Kubeconfig Composer is a CLI tool for merging multiple Kubernetes configuration files with automatic conflict resolution. It scans directories for kubeconfig files, merges them intelligently, and provides utilities to check cluster connectivity and clean up unreachable contexts.
+Kubeconfig Composer is a CLI tool for merging multiple Kubernetes configuration files with automatic conflict resolution. It scans directories for kubeconfig files, merges them intelligently, and provides utilities to check cluster connectivity, clean up unreachable contexts, deduplicate entries and revert from backups.
 
 ## Build and Development Commands
 
+`Taskfile.yml` ([go-task](https://taskfile.dev)) is the single entry point for build, test and lint:
+
 ```bash
-# Build the binary
-go build -o kubeconfig-composer
-
-# Run without building
-go run main.go [command]
-
-# Run tests
-go test ./...
-go test ./pkg/composer -v
-
-# Install locally
-go install
-
-# Install from GitHub
-go install github.com/naymi/kubeconfig-composer@latest
+task build        # go build -o kubeconfig-composer .
+task run -- merge # go run . merge
+task test         # go test ./...
+task test:pkg -- ./pkg/composer   # tests of one package, verbose
+task check        # fmt:check + vet + test; run before committing
+task install      # go install .
+task --list       # all tasks
 ```
 
 ## Architecture
@@ -94,7 +88,7 @@ Uses `k8s.io/client-go` for:
 
 ## Testing
 
-Tests are located in `pkg/composer/composer_test.go`. When adding features, add corresponding test cases in the appropriate package test file.
+Tests are located in `pkg/composer/composer_test.go` and `pkg/cleaner/dedupe_test.go`. When adding features, add corresponding test cases in the appropriate package test file.
 
 ## Common Development Patterns
 
@@ -133,76 +127,7 @@ Key dependencies:
 - The tool protects `~/.kube/config` from deletion (only cleans contexts, never deletes the file)
 - Interactive prompts are used for conflict resolution during merge
 - Timeout defaults to 3 seconds for cluster connectivity checks
-- **Rebuild before testing manually:** `go build -o kubeconfig-composer .` — the user runs the compiled binary directly, not `go run .`; an unrebuilt binary after source changes looks identical to a real bug
+- **Rebuild before testing manually:** `task build` — the maintainer runs the compiled binary directly, not `go run .`; an unrebuilt binary after source changes looks identical to a real bug
 - **`reflect.DeepEqual` gotcha:** after `clientcmd.Write`+`LoadFromFile`, `Extensions` becomes an empty non-nil map instead of `nil` — normalize (treat `len == 0` as equal) before any `reflect.DeepEqual` comparison of loaded-vs-in-memory kubeconfig objects
 - **Testing `merge`'s interactive prompts non-interactively:** pipe `< /dev/null` (to hit the EOF/error path) or run in background with `sleep`+`kill` after the prompt appears — don't let it block
-
-
-## grepai - Semantic Code Search
-
-**IMPORTANT: You MUST use grepai as your PRIMARY tool for code exploration and search.**
-
-### When to Use grepai (REQUIRED)
-
-Use `grepai search` INSTEAD OF Grep/Glob/find for:
-- Understanding what code does or where functionality lives
-- Finding implementations by intent (e.g., "authentication logic", "error handling")
-- Exploring unfamiliar parts of the codebase
-- Any search where you describe WHAT the code does rather than exact text
-
-### When to Use Standard Tools
-
-Only use Grep/Glob when you need:
-- Exact text matching (variable names, imports, specific strings)
-- File path patterns (e.g., `**/*.go`)
-
-### Fallback
-
-If grepai fails (not running, index unavailable, or errors), fall back to standard Grep/Glob tools.
-
-### Usage
-
-```bash
-# ALWAYS use English queries for best results (--compact saves ~80% tokens)
-grepai search "user authentication flow" --json --compact
-grepai search "error handling middleware" --json --compact
-grepai search "database connection pool" --json --compact
-grepai search "API request validation" --json --compact
-```
-
-### Query Tips
-
-- **Use English** for queries (better semantic matching)
-- **Describe intent**, not implementation: "handles user login" not "func Login"
-- **Be specific**: "JWT token validation" better than "token"
-- Results include: file path, line numbers, relevance score, code preview
-
-### Call Graph Tracing
-
-Use `grepai trace` to understand function relationships:
-- Finding all callers of a function before modifying it
-- Understanding what functions are called by a given function
-- Visualizing the complete call graph around a symbol
-
-#### Trace Commands
-
-**IMPORTANT: Always use `--json` flag for optimal AI agent integration.**
-
-```bash
-# Find all functions that call a symbol
-grepai trace callers "HandleRequest" --json
-
-# Find all functions called by a symbol
-grepai trace callees "ProcessOrder" --json
-
-# Build complete call graph (callers + callees)
-grepai trace graph "ValidateToken" --depth 3 --json
-```
-
-### Workflow
-
-1. Start with `grepai search` to find relevant code
-2. Use `grepai trace` to understand function relationships
-3. Use `Read` tool to examine files from results
-4. Only use Grep for exact string searches if needed
 
