@@ -12,6 +12,33 @@ tasks:
       - task --list
     silent: true
 
+  setup:
+    desc: Подготовить свежий checkout к работе (зависимости, git hook); безопасно запускать повторно
+    cmds:
+      - task: setup:deps
+      - task: setup:hooks
+
+  setup:deps:
+    desc: Проверить версию Go и скачать зависимости модуля
+    cmds:
+      - go version
+      - go mod download
+
+  setup:hooks:
+    desc: Установить pre-commit hook, который запускает task check
+    cmds:
+      - |
+        hook="$(git rev-parse --git-path hooks/pre-commit)"
+        marker="# managed by: task setup"
+        if [ -e "$hook" ] && ! grep -qF "$marker" "$hook"; then
+          echo "pre-commit hook уже существует и создан не через task setup, пропускаю: $hook"
+          exit 0
+        fi
+        mkdir -p "$(dirname "$hook")"
+        printf '#!/bin/sh\n%s\nexec task check\n' "$marker" > "$hook"
+        chmod +x "$hook"
+        echo "pre-commit hook установлен: $hook"
+
   build:
     desc: Собрать бинарник
     cmds:
@@ -48,6 +75,11 @@ tasks:
     cmds:
       - go test {{.CLI_ARGS}} -v
 
+  test:install:
+    desc: Тесты install.sh на локальном HTTP-сервере вместо GitHub (нужен python3)
+    cmds:
+      - sh scripts/install_test.sh
+
   cover:
     desc: Тесты с отчётом о покрытии (coverage.out + HTML)
     cmds:
@@ -58,6 +90,16 @@ tasks:
     desc: Статический анализ go vet
     cmds:
       - go vet ./...
+
+  lint:sh:
+    desc: shellcheck для install.sh и скриптов (пропускается, если shellcheck не установлен)
+    cmds:
+      - |
+        if ! command -v shellcheck >/dev/null 2>&1; then
+          echo "shellcheck не установлен, пропускаю (brew install shellcheck)"
+          exit 0
+        fi
+        shellcheck install.sh scripts/*.sh
 
   fmt:
     desc: Отформатировать код
@@ -75,11 +117,13 @@ tasks:
       - go mod tidy
 
   check:
-    desc: Полная проверка перед коммитом (fmt-check, vet, test)
+    desc: Полная проверка перед коммитом (fmt-check, vet, test, lint:sh, test:install)
     cmds:
       - task: fmt:check
       - task: vet
       - task: test
+      - task: lint:sh
+      - task: test:install
 
   clean:
     desc: Удалить артефакты сборки

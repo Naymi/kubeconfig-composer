@@ -31,3 +31,9 @@ coverage.out
 # OS
 .DS_Store
 .grepai/
+
+# Temporary files
+.tmp/
+
+# GoReleaser output
+dist/
