@@ -12,6 +12,33 @@ tasks:
       - task --list
     silent: true
 
+  setup:
+    desc: Подготовить свежий checkout к работе (зависимости, git hook); безопасно запускать повторно
+    cmds:
+      - task: setup:deps
+      - task: setup:hooks
+
+  setup:deps:
+    desc: Проверить версию Go и скачать зависимости модуля
+    cmds:
+      - go version
+      - go mod download
+
+  setup:hooks:
+    desc: Установить pre-commit hook, который запускает task check
+    cmds:
+      - |
+        hook="$(git rev-parse --git-path hooks/pre-commit)"
+        marker="# managed by: task setup"
+        if [ -e "$hook" ] && ! grep -qF "$marker" "$hook"; then
+          echo "pre-commit hook уже существует и создан не через task setup, пропускаю: $hook"
+          exit 0
+        fi
+        mkdir -p "$(dirname "$hook")"
+        printf '#!/bin/sh\n%s\nexec task check\n' "$marker" > "$hook"
+        chmod +x "$hook"
+        echo "pre-commit hook установлен: $hook"
+
   build:
     desc: Собрать бинарник
     cmds:

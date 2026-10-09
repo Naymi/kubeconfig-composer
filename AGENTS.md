@@ -11,6 +11,7 @@ Kubeconfig Composer is a CLI tool for merging multiple Kubernetes configuration 
 `Taskfile.yml` ([go-task](https://taskfile.dev)) is the single entry point for build, test and lint:
 
 ```bash
+task setup        # fresh checkout: go mod download + pre-commit hook (runs `task check`); idempotent
 task build        # go build -o kubeconfig-composer .
 task run -- merge # go run . merge
 task test         # go test ./...

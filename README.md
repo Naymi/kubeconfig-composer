@@ -166,6 +166,7 @@ kubeconfig-composer revert --output ~/.kube/merged-config
 Все команды сборки и проверки собраны в [Taskfile](https://taskfile.dev):
 
 ```bash
+task setup   # подготовить checkout: зависимости и pre-commit hook
 task build   # собрать бинарник
 task test    # тесты
 task check   # fmt:check, vet, test
