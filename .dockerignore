@@ -1,0 +1,13 @@
+.git
+.github
+.idea
+.serena
+.claude
+.grepai
+.task
+.tmp
+.mcp.json
+kubeconfig-composer
+*.test
+coverage.out
+merged-kubeconfig.yaml

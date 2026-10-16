@@ -5,6 +5,7 @@ vars:
   BINARY: kubeconfig-composer
   PKG: github.com/naymi/kubeconfig-composer
   GO_IMAGE: golang:1.24.1-bookworm
+  TEST_IMAGE: kubeconfig-composer-test:local
 
 tasks:
   default:
@@ -103,6 +104,12 @@ tasks:
         -e GOCACHE=/tmp/gocache
         -e GOFLAGS=-buildvcs=false
         {{.GO_IMAGE}} go test {{.CLI_ARGS}}
+
+  test:container:
+    desc: Полный прогон в контейнере - gofmt, vet (linux и windows), unit-тесты, затем e2e init в bash и zsh
+    cmds:
+      - docker build --progress=plain -f scripts/Dockerfile.test --build-arg GO_IMAGE={{.GO_IMAGE}} -t {{.TEST_IMAGE}} .
+      - docker run --rm {{.TEST_IMAGE}}
 
   cover:
     desc: Тесты с отчётом о покрытии (coverage.out + HTML)
