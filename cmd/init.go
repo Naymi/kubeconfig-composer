@@ -20,8 +20,9 @@ var (
 var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Собрать kubeconfig при старте shell и вывести export KUBECONFIG",
-	Long: `Предназначена для .bashrc/.zshrc: собирает ~/.kube/kc.yaml из всех
-kubeconfig файлов в ~/.kube и печатает команду export KUBECONFIG=... для eval.
+	Long: `Предназначена для .bashrc/.zshrc: собирает ~/.kubeconfig-composer/kc.yaml
+из всех kubeconfig файлов в ~/.kube и печатает команду export KUBECONFIG=...
+для eval.
 
 Файлы не парсятся, пока не изменились: по умолчанию init только сверяет
 отпечаток (путь, mtime, размер) источников с сохранённым. Если источники
@@ -30,8 +31,9 @@ kubeconfig файлов в ~/.kube и печатает команду export KUB
 stderr; запустите init --refresh вручную.
 
 kc.yaml — производный файл: current-context и namespace в нём сохраняются при
-пересборке, остальные правки перезаписываются. Новые кластеры добавляйте в
-отдельные файлы-источники, например:
+пересборке, остальные правки перезаписываются. Не кладите --output внутрь
+--dir: там его подхватит merge как источник, а merge --cleanup унесёт в trash.
+Новые кластеры добавляйте в отдельные файлы-источники, например:
   alias eks-add='KUBECONFIG=~/.kube/aws.yaml aws eks update-kubeconfig'`,
 	Example: `  # В ~/.bashrc или ~/.zshrc
   eval "$(kubeconfig-composer init)"
@@ -40,7 +42,7 @@ kc.yaml — производный файл: current-context и namespace в н�
   kubeconfig-composer init --refresh
 
   # Другая директория источников и другой выходной файл
-  eval "$(kubeconfig-composer init --dir ~/work/kube --output ~/work/kube/kc.yaml)"`,
+  eval "$(kubeconfig-composer init --dir ~/work/kube --output ~/work/kc.yaml)"`,
 	// Ошибку печатает Execute() один раз; usage в eval-сценарии только мешает.
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -50,12 +52,17 @@ kc.yaml — производный файл: current-context и namespace в н�
 func init() {
 	rootCmd.AddCommand(initCmd)
 
-	home := os.Getenv("HOME")
-	initCmd.Flags().StringVarP(&initDir, "dir", "d", filepath.Join(home, ".kube"), "Директория с kubeconfig файлами")
-	initCmd.Flags().StringVarP(&initOutput, "output", "o", filepath.Join(home, ".kube", "kc.yaml"), "Собираемый файл")
+	initCmd.Flags().StringVarP(&initDir, "dir", "d", filepath.Join(os.Getenv("HOME"), ".kube"), "Директория с kubeconfig файлами")
+	initCmd.Flags().StringVarP(&initOutput, "output", "o", filepath.Join(initStateDir(), "kc.yaml"), "Собираемый файл (лучше вне --dir)")
 	initCmd.Flags().StringVar(&initPrefix, "prefix", "kc", `Префикс имён, как у merge (пустая строка отключает)`)
 	initCmd.Flags().IntVar(&initMaxSize, "max-size", 5, "Порог суммарного размера источников в МБ, выше которого пересборка при старте пропускается (0 — без порога)")
 	initCmd.Flags().BoolVar(&initRefresh, "refresh", false, "Пересобрать сейчас, порог размера не учитывается")
+}
+
+// initStateDir — каталог состояния ~/.kubeconfig-composer. В нём же лежит
+// kc.yaml по умолчанию: вне ~/.kube его не подхватит merge.
+func initStateDir() string {
+	return filepath.Join(os.Getenv("HOME"), ".kubeconfig-composer")
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
@@ -66,7 +73,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 		MaxSizeMB: initMaxSize,
 		Refresh:   initRefresh,
 		Version:   version,
-		StateDir:  filepath.Join(os.Getenv("HOME"), ".kubeconfig-composer"),
+		StateDir:  initStateDir(),
 		Log:       os.Stderr,
 	})
 

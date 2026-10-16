@@ -47,3 +47,33 @@ func TestFindKubeconfigFilesSkipsUnreadableSubdir(t *testing.T) {
 		t.Fatalf("got %v, want %v", rel, want)
 	}
 }
+
+func TestWalkKubeconfigFilesReportsUnreadableSubdir(t *testing.T) {
+	root := t.TempDir()
+	writeKubeconfig(t, filepath.Join(root, "a.yaml"))
+	writeKubeconfig(t, filepath.Join(root, "z", "b.yaml"))
+	writeKubeconfig(t, filepath.Join(root, "locked", "hidden.yaml"))
+	locked := filepath.Join(root, "locked")
+	lockDir(t, locked)
+
+	var skipped []string
+	var visited []string
+	err := WalkKubeconfigFiles(root, func(path string, err error) {
+		if err == nil {
+			t.Errorf("onSkip(%s) без ошибки", path)
+		}
+		skipped = append(skipped, path)
+	}, func(path string) error {
+		visited = append(visited, path)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("недоступный подкаталог не должен прерывать обход: %v", err)
+	}
+	if len(skipped) != 1 || skipped[0] != locked {
+		t.Errorf("onSkip: got %v, want [%s]", skipped, locked)
+	}
+	if len(visited) != 2 {
+		t.Errorf("visit: got %v, want a.yaml и z/b.yaml", visited)
+	}
+}

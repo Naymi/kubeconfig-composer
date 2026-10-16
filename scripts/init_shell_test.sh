@@ -40,11 +40,14 @@ check() { # описание, ожидаемое, фактическое
 for sh_bin in bash zsh; do
 	# shellcheck disable=SC2016 # одинарные кавычки намеренны: подстановки выполняет вложенный шелл
 	got="$($sh_bin -c 'eval "$(kubeconfig-composer init)"; printf %s "$KUBECONFIG"')"
-	check "$sh_bin выставляет KUBECONFIG" "$HOME/.kube/kc.yaml" "$got"
+	check "$sh_bin выставляет KUBECONFIG" "$HOME/.kubeconfig-composer/kc.yaml" "$got"
 done
 
-got="$(KUBECONFIG="$HOME/.kube/kc.yaml" kubeconfig-composer list --dir "$HOME/.kube" 2>&1 | grep -c 'kc.yaml' || true)"
-check "list видит kc.yaml как обычный файл, шелл не сломан" "1" "$got"
+# kc.yaml лежит вне ~/.kube: list (и merge) его там не видят.
+got="$(KUBECONFIG="$HOME/.kubeconfig-composer/kc.yaml" kubeconfig-composer list --dir "$HOME/.kube" 2>&1 | grep -c 'kc.yaml' || true)"
+check "list не видит kc.yaml в ~/.kube" "0" "$got"
+got="$(kubeconfig-composer list --dir "$HOME/.kube" 2>&1 | grep -c 'dev.yaml' || true)"
+check "list видит источник dev.yaml" "1" "$got"
 
 # Сбой init не должен ломать запуск оболочки: eval пустого stdout, дальше всё работает.
 for sh_bin in bash zsh; do

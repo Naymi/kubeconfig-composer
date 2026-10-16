@@ -67,7 +67,8 @@ func (e *env) source(t *testing.T, rel, ctx, server string) {
 	}
 }
 
-func (e *env) output() string { return filepath.Join(e.kube, "kc.yaml") }
+// output — kc.yaml по умолчанию: вне ~/.kube, чтобы merge не брал его как источник.
+func (e *env) output() string { return filepath.Join(e.home, ".kubeconfig-composer", "kc.yaml") }
 
 func (e *env) load(t *testing.T) *clientcmdapi.Config {
 	t.Helper()
@@ -334,5 +335,43 @@ func TestInitBrokenSourceWithExistingOutputKeepsGoodContext(t *testing.T) {
 	}
 	if _, ok := e.load(t).Contexts["kc:dev:dev.yaml"]; !ok {
 		t.Error("хороший контекст пропал из kc.yaml")
+	}
+}
+
+func TestInitOutputIsNotAMergeSource(t *testing.T) {
+	e := newEnv(t)
+	e.source(t, "a.yaml", "a", "https://a")
+	e.source(t, "b.yaml", "b", "https://b")
+	if _, _, code := e.run("init"); code != 0 {
+		t.Fatal("init")
+	}
+
+	// merge с параметрами по умолчанию: сканирует ~/.kube, пишет ~/.kube/config
+	// (его ещё нет, поэтому вопроса о перезаписи не будет), --cleanup уносит
+	// загруженные источники в trash без вопроса.
+	stdout, stderr, code := e.run("merge", "-y", "--cleanup")
+	if code != 0 {
+		t.Fatalf("merge: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if strings.Contains(stdout, "kc.yaml") {
+		t.Errorf("kc.yaml попал в источники merge: %q", stdout)
+	}
+	if !strings.Contains(stdout, "Найдено 2 файлов") {
+		t.Errorf("ожидалось ровно 2 источника (a.yaml, b.yaml): %q", stdout)
+	}
+	if got := len(e.load(t).Contexts); got != 2 {
+		t.Errorf("kc.yaml после merge --cleanup: контекстов %d, ожидалось 2", got)
+	}
+	trash, _ := filepath.Glob(filepath.Join(e.home, ".kubeconfig-composer", "trash", "*kc.yaml"))
+	if len(trash) != 0 {
+		t.Errorf("kc.yaml уехал в trash: %v", trash)
+	}
+
+	cfg, err := clientcmd.LoadFromFile(filepath.Join(e.kube, "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Contexts) != 2 {
+		t.Errorf("в ~/.kube/config %d контекстов, ожидалось 2: %v", len(cfg.Contexts), cfg.Contexts)
 	}
 }

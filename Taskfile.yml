@@ -43,14 +43,18 @@ tasks:
         echo "pre-commit hook установлен: $hook"
 
   setup:docker:
-    desc: Скачать образ для контейнерных тестов (пропускается, если Docker не установлен)
+    desc: Скачать образ для контейнерных тестов (пропускается без Docker, без запущенного daemon или без сети)
     cmds:
       - |
         if ! command -v docker >/dev/null 2>&1; then
           echo "docker не установлен, пропускаю (нужен для task test:docker и task test:container)"
           exit 0
         fi
-        docker pull {{.GO_IMAGE}}
+        if ! docker info >/dev/null 2>&1; then
+          echo "docker daemon недоступен, пропускаю (нужен для task test:docker и task test:container)"
+          exit 0
+        fi
+        docker pull {{.GO_IMAGE}} || echo "не удалось скачать {{.GO_IMAGE}}; task test:docker скачает его при первом запуске"
 
   build:
     desc: Собрать бинарник

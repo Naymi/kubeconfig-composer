@@ -103,3 +103,40 @@ func TestFindKubeconfigFilesSkipsServiceDirs(t *testing.T) {
 		t.Fatalf("got %v, want %v", rel, want)
 	}
 }
+
+func TestWalkKubeconfigFilesSkipsServiceEntries(t *testing.T) {
+	root := filepath.Join(t.TempDir(), ".kube")
+	writeKubeconfig(t, filepath.Join(root, "config"))
+	writeKubeconfig(t, filepath.Join(root, "nested", "ok.yaml"))
+	writeKubeconfig(t, filepath.Join(root, "cache", "x.yaml"))
+	writeKubeconfig(t, filepath.Join(root, "kubens", "ctx"))
+	writeKubeconfig(t, filepath.Join(root, ".hidden", "z.yaml"))
+	writeKubeconfig(t, filepath.Join(root, "kubectx"))
+	writeKubeconfig(t, filepath.Join(root, "config.lock"))
+
+	var rel []string
+	skipped := 0
+	err := WalkKubeconfigFiles(root, func(string, error) { skipped++ }, func(path string) error {
+		r, _ := filepath.Rel(root, path)
+		rel = append(rel, r)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(rel)
+	want := []string{"config", filepath.Join("nested", "ok.yaml")}
+	if len(rel) != len(want) || rel[0] != want[0] || rel[1] != want[1] {
+		t.Fatalf("got %v, want %v", rel, want)
+	}
+	if skipped != 0 {
+		t.Errorf("onSkip вызван %d раз без ошибок обхода", skipped)
+	}
+}
+
+func TestWalkKubeconfigFilesMissingRootIsError(t *testing.T) {
+	err := WalkKubeconfigFiles(filepath.Join(t.TempDir(), "nope"), nil, func(string) error { return nil })
+	if err == nil {
+		t.Fatal("недоступный корень должен давать ошибку")
+	}
+}

@@ -64,16 +64,23 @@ func IsKubeconfigFile(path string, info os.FileInfo) bool {
 	return hasContexts || hasClusters || hasUsers
 }
 
-// FindKubeconfigFiles сканирует директорию и возвращает список kubeconfig
-// файлов. Ошибкой заканчивается только недоступный корень; недоступный файл
-// или подкаталог внутри молча пропускается, как и файл, который не загружается.
-func FindKubeconfigFiles(dir string) ([]string, error) {
-	var files []string
-
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+// WalkKubeconfigFiles — единственный обход каталога источников, через него
+// работают FindKubeconfigFiles, Composer.ScanDirectory и команда list. visit
+// вызывается для каждого файла, который проходит IsKubeconfigFile; подкаталоги
+// из IsSkippedDir пропускаются (корень не проверяется — ~/.kube сам скрытый).
+//
+// Ошибкой заканчивается только недоступный корень. Недоступный файл или
+// подкаталог внутри передаётся в onSkip (если он не nil) и пропускается: иначе
+// одна нечитаемая папка ломала бы каждую сборку, а обход для отпечатка init
+// (initstate.Scan) на ней не останавливается. Ошибка из visit прерывает обход.
+func WalkKubeconfigFiles(dir string, onSkip func(path string, err error), visit func(path string) error) error {
+	return filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			if path == dir {
 				return err
+			}
+			if onSkip != nil {
+				onSkip(path, err)
 			}
 			if info != nil && info.IsDir() {
 				return filepath.SkipDir
@@ -91,13 +98,19 @@ func FindKubeconfigFiles(dir string) ([]string, error) {
 		if !IsKubeconfigFile(path, info) {
 			return nil
 		}
+		return visit(path)
+	})
+}
 
-		// Проверяем, что файл можно загрузить как kubeconfig
-		_, err = clientcmd.LoadFromFile(path)
-		if err != nil {
+// FindKubeconfigFiles возвращает kubeconfig файлы в dir, которые загружаются
+// через clientcmd; остальные молча отбрасываются.
+func FindKubeconfigFiles(dir string) ([]string, error) {
+	var files []string
+
+	err := WalkKubeconfigFiles(dir, nil, func(path string) error {
+		if _, err := clientcmd.LoadFromFile(path); err != nil {
 			return nil
 		}
-
 		files = append(files, path)
 		return nil
 	})
