@@ -631,3 +631,25 @@ func TestScanDirectoryOrderIsDeterministic(t *testing.T) {
 		}
 	}
 }
+
+func TestWriteOutputAtomicWritesMergedConfig(t *testing.T) {
+	c := New(true)
+	c.configs = []configWithSource{
+		{config: makeConfig("dev", "dev-c", "dev-u", "https://dev", "t"), source: "dev", fullPath: "/d/dev.yaml"},
+	}
+	if err := c.Merge(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Result() != c.mergedConfig {
+		t.Fatal("Result должен возвращать внутренний итоговый конфиг")
+	}
+
+	out := filepath.Join(t.TempDir(), "nested", "kc.yaml")
+	if err := c.WriteOutputAtomic(out); err != nil {
+		t.Fatal(err)
+	}
+	same, err := c.OutputUnchanged(out)
+	if err != nil || !same {
+		t.Fatalf("записанный файл должен совпадать с результатом: same=%v err=%v", same, err)
+	}
+}

@@ -548,6 +548,23 @@ func (c *Composer) WriteOutput(path string) error {
 	return nil
 }
 
+// Result возвращает итоговый конфиг после Merge (и Dedupe). Возвращается тот же
+// указатель, что хранит Composer: правки вызывающего видны в OutputUnchanged и
+// WriteOutputAtomic. После Dedupe указатель меняется — вызывать Result заново.
+func (c *Composer) Result() *clientcmdapi.Config {
+	return c.mergedConfig
+}
+
+// WriteOutputAtomic — как WriteOutput, но через временный файл и rename
+// (см. cleaner.WriteFileAtomic).
+func (c *Composer) WriteOutputAtomic(path string) error {
+	data, err := clientcmd.Write(*c.mergedConfig)
+	if err != nil {
+		return fmt.Errorf("failed to serialize config: %w", err)
+	}
+	return cleaner.WriteFileAtomic(path, data, 0o600)
+}
+
 // OutputUnchanged сообщает, совпадает ли результат текущего merge с уже
 // записанным по пути path файлом по содержимому (имена и наборы
 // кластеров/пользователей/контекстов, current-context) — чтобы не
