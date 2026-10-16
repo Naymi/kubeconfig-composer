@@ -3,6 +3,7 @@ package initstate
 import (
 	"errors"
 	"io/fs"
+	"os"
 	"sort"
 
 	"k8s.io/client-go/tools/clientcmd"
@@ -49,12 +50,22 @@ func contextNamespaces(cfg *clientcmdapi.Config) map[string]string {
 }
 
 // ReadSession читает прежний kc.yaml. Если файла нет, возвращает (nil, nil).
+// rebuild её не вызывает: он сам читает байты, чтобы бэкап совпал с сессией.
 func ReadSession(path string) (*Session, error) {
-	cfg, err := clientcmd.LoadFromFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
+		return nil, err
+	}
+	return sessionFromBytes(data)
+}
+
+// sessionFromBytes разбирает уже прочитанное содержимое прежнего kc.yaml.
+func sessionFromBytes(data []byte) (*Session, error) {
+	cfg, err := clientcmd.Load(data)
+	if err != nil {
 		return nil, err
 	}
 	s := &Session{

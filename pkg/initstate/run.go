@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -186,12 +187,16 @@ func stampOf(path string) fileStamp {
 //
 // Разбор источников идёт без блокировок: он долгий, а пока lock client-go
 // "<exported>.lock" занят, kubectl config use-context падает сразу. Под lock
-// только операции в памяти и rename. Попытка: stat output → прочитать прежний
-// output (сессию; нечитаемый файл сохраняется в бэкап) → current-context (до
-// Dedupe) → Dedupe → запомнить namespace источников → перенести namespace →
-// бэкап, если пропадают чужие записи → stat output ещё раз. Если файл
-// изменился, попытка повторяется заново с собранного из источников конфига,
-// но не больше maxSessionAttempts раз; затем запись. Пустой output считается
+// только операции в памяти и rename. Попытка: stat output → прочитать байты
+// прежнего output и разобрать из них сессию (нечитаемый файл сохраняется в
+// бэкап) → current-context (до Dedupe) → Dedupe → запомнить namespace
+// источников → перенести namespace → бэкап, если пропадают чужие записи →
+// stat output ещё раз. Бэкап — те же байты, из которых разобрана сессия;
+// каждая версия прежнего файла (по stat) сохраняется не больше одного раза,
+// а предупреждение о пропавших записях ссылается на бэкап версии, прочитанной
+// последней попыткой. Если файл изменился, попытка повторяется заново с
+// собранного из источников конфига, но не больше maxSessionAttempts раз; затем
+// запись. Пустой output считается
 // чужой записью в процессе (kubectx делает truncate + write): ждём и пробуем
 // снова, а на последней попытке считаем, что сессии нет.
 //
@@ -240,12 +245,26 @@ func rebuild(opts Options, dir, output, exported string, prev *State, logf func(
 	}
 	backupDir := filepath.Join(opts.StateDir, "backups")
 
+	// Бэкапы по версиям прежнего output: одна версия сохраняется один раз,
+	// сколько бы попыток её ни прочитали.
+	type savedBackup struct {
+		path string
+		err  error
+	}
+	saved := map[fileStamp]savedBackup{}
+	saveOnce := func(stamp fileStamp, data []byte) savedBackup {
+		if b, ok := saved[stamp]; ok {
+			return b
+		}
+		var b savedBackup
+		b.path, b.err = backupFile(filepath.Base(output), data, backupDir)
+		saved[stamp] = b
+		return b
+	}
+
 	var (
-		unreadableSaved  bool // нечитаемый output уже сохранён в этой пересборке
-		lostSaved        bool // output с пропадающими чужими записями уже сохранён
-		lostBackup       string
-		lostBackupErr    error
 		lost             []string
+		lostBackup       savedBackup // бэкап той версии, по которой посчитан lost
 		sourceNamespaces map[string]string
 	)
 	for attempt := 1; ; attempt++ {
@@ -259,18 +278,28 @@ func rebuild(opts Options, dir, output, exported string, prev *State, logf func(
 			continue
 		}
 
+		// Сессию разбираем из тех же байтов, что уйдут в бэкап: иначе между
+		// чтением и копированием файл могут переписать.
 		var sess *Session
+		var data []byte
 		if !empty {
-			var serr error
-			if sess, serr = ReadSession(output); serr != nil {
-				sess = nil
-				if !unreadableSaved {
-					unreadableSaved = true
-					backup, berr := backupFile(output, backupDir)
-					if berr != nil {
-						logf("⚠ не удалось прочитать прежний %s: %v; сохранить прежний файл не удалось: %v", output, serr, berr)
-					} else {
-						logf("⚠ не удалось прочитать прежний %s: %v; прежний файл сохранён: %s", output, serr, backup)
+			var rerr error
+			data, rerr = os.ReadFile(output)
+			switch {
+			case errors.Is(rerr, fs.ErrNotExist):
+				// файла нет — сессии нет
+			case rerr != nil:
+				logf("⚠ не удалось прочитать прежний %s: %v; сессия не перенесена", output, rerr)
+			default:
+				var serr error
+				if sess, serr = sessionFromBytes(data); serr != nil {
+					sess = nil
+					if _, done := saved[before]; !done {
+						if b := saveOnce(before, data); b.err != nil {
+							logf("⚠ не удалось прочитать прежний %s: %v; сохранить прежний файл не удалось: %v", output, serr, b.err)
+						} else {
+							logf("⚠ не удалось прочитать прежний %s: %v; прежний файл сохранён: %s", output, serr, b.path)
+						}
 					}
 				}
 			}
@@ -288,9 +317,8 @@ func rebuild(opts Options, dir, output, exported string, prev *State, logf func(
 			// Пропадает то, что init на прошлой сборке не записывал (или
 			// состояния нет вовсе, и файл собирал не init): сохраняем прежний файл.
 			lost = sess.LostForeign(c.Result(), owned)
-			if len(lost) > 0 && !lostSaved {
-				lostSaved = true
-				lostBackup, lostBackupErr = backupFile(output, backupDir)
+			if len(lost) > 0 {
+				lostBackup = saveOnce(before, data)
 			}
 		}
 
@@ -304,10 +332,10 @@ func rebuild(opts Options, dir, output, exported string, prev *State, logf func(
 
 	if len(lost) > 0 {
 		list := formatLost(lost)
-		if lostBackupErr != nil {
-			logf("⚠ в новом %s нет записей, которых нет среди источников: %s; сохранить прежний файл не удалось: %v", output, list, lostBackupErr)
+		if lostBackup.err != nil {
+			logf("⚠ в новом %s нет записей, которых нет среди источников: %s; сохранить прежний файл не удалось: %v", output, list, lostBackup.err)
 		} else {
-			logf("⚠ в новом %s нет записей, которых нет среди источников: %s; прежний файл сохранён: %s", output, list, lostBackup)
+			logf("⚠ в новом %s нет записей, которых нет среди источников: %s; прежний файл сохранён: %s", output, list, lostBackup.path)
 		}
 	}
 
@@ -337,21 +365,42 @@ func formatLost(lost []string) string {
 	return out
 }
 
-// backupFile копирует src в backupDir под именем, которое понимает revert:
-// "<имя>.backup.<timestamp>".
-func backupFile(src, backupDir string) (string, error) {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return "", err
-	}
+// maxBackupSuffix — сколько имён с суффиксом backupFile перебирает за одну секунду.
+const maxBackupSuffix = 100
+
+// backupNow — время в имени бэкапа; тесты подменяют.
+var backupNow = time.Now
+
+// backupFile сохраняет data в backupDir под именем, которое понимает revert:
+// "<name>.backup.<timestamp>". Существующий файл не перезаписывается: если имя
+// занято (бэкап в ту же секунду), к нему добавляется "-2", "-3" и так далее.
+func backupFile(name string, data []byte, backupDir string) (string, error) {
 	if err := os.MkdirAll(backupDir, 0o755); err != nil {
 		return "", err
 	}
-	dst := filepath.Join(backupDir, fmt.Sprintf("%s.backup.%s", filepath.Base(src), time.Now().Format("20060102-150405")))
-	if err := os.WriteFile(dst, data, 0o600); err != nil {
-		return "", err
+	base := filepath.Join(backupDir, fmt.Sprintf("%s.backup.%s", name, backupNow().Format("20060102-150405")))
+	for n := 1; n <= maxBackupSuffix; n++ {
+		dst := base
+		if n > 1 {
+			dst = fmt.Sprintf("%s-%d", base, n)
+		}
+		f, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if _, err := f.Write(data); err != nil {
+			f.Close()
+			return "", err
+		}
+		if err := f.Close(); err != nil {
+			return "", err
+		}
+		return dst, nil
 	}
-	return dst, nil
+	return "", fmt.Errorf("занято %d имён бэкапа %s", maxBackupSuffix, base)
 }
 
 func fileExists(path string) bool {

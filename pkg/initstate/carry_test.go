@@ -129,3 +129,19 @@ func TestLostForeign(t *testing.T) {
 		t.Errorf("без состояния: got %v, want %v", got, want)
 	}
 }
+
+func TestSessionFromBytes(t *testing.T) {
+	old := cfgWith("a")
+	old.CurrentContext = "a"
+	data, err := clientcmd.Write(*old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := sessionFromBytes(data)
+	if err != nil || s == nil || s.CurrentContext != "a" || !s.Names["a-c"] {
+		t.Fatalf("s=%+v err=%v", s, err)
+	}
+	if _, err := sessionFromBytes([]byte("clusters: [{\n")); err == nil {
+		t.Error("битый YAML должен давать ошибку")
+	}
+}

@@ -883,3 +883,142 @@ func TestRunRecheckGivesUpAfterThreeAttempts(t *testing.T) {
 		t.Errorf("контексты: %v", got)
 	}
 }
+
+// addForeign дописывает в cfg кластер, пользователя и контекст с именем name —
+// запись, которую в kc.yaml внёс не init.
+func addForeign(cfg *clientcmdapi.Config, name string) {
+	cfg.Clusters[name] = &clientcmdapi.Cluster{Server: "https://" + name}
+	cfg.AuthInfos[name] = &clientcmdapi.AuthInfo{Token: "t-" + name}
+	cfg.Contexts[name] = &clientcmdapi.Context{Cluster: name, AuthInfo: name}
+}
+
+// lostBackupPath возвращает путь бэкапа из предупреждения о пропавших чужих записях.
+func (f *fixture) lostBackupPath(t *testing.T) string {
+	t.Helper()
+	const marker = "прежний файл сохранён: "
+	var found []string
+	for _, line := range strings.Split(f.log.String(), "\n") {
+		if !strings.Contains(line, "нет записей, которых нет среди источников") {
+			continue
+		}
+		i := strings.Index(line, marker)
+		if i < 0 {
+			t.Fatalf("в предупреждении нет пути бэкапа: %q", line)
+		}
+		found = append(found, line[i+len(marker):])
+	}
+	if len(found) != 1 {
+		t.Fatalf("ожидалось одно предупреждение о пропавших записях, есть %d: %q", len(found), f.log)
+	}
+	return found[0]
+}
+
+func TestRunLostBackupMatchesLastAttempt(t *testing.T) {
+	f := newFixture(t)
+	f.source(t, "dev.yaml", "dev", "https://dev")
+	f.run(t)
+	f.edit(t, func(cfg *clientcmdapi.Config) { addForeign(cfg, "f1") })
+	f.source(t, "prod.yaml", "prod", "https://prod")
+
+	// Между попытками aws eks update-kubeconfig дописал в kc.yaml ещё одну запись.
+	setBeforeWriteHook(t, func(call int) {
+		if call == 1 {
+			f.edit(t, func(cfg *clientcmdapi.Config) { addForeign(cfg, "f2") })
+			f.touch(t, 1)
+		}
+	})
+	f.run(t)
+
+	if msg := f.log.String(); !strings.Contains(msg, "f1") || !strings.Contains(msg, "f2") {
+		t.Errorf("в предупреждении должны быть f1 и f2: %q", msg)
+	}
+	kept, err := clientcmd.LoadFromFile(f.lostBackupPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept.Contexts["f1"] == nil || kept.Contexts["f2"] == nil {
+		t.Errorf("в бэкапе из предупреждения должны быть f1 и f2, есть %v", contextNames(kept))
+	}
+}
+
+func TestRunUnreadableBackupDoesNotOverwriteLostBackup(t *testing.T) {
+	f := newFixture(t)
+	f.source(t, "dev.yaml", "dev", "https://dev")
+	f.run(t)
+	f.edit(t, func(cfg *clientcmdapi.Config) { addForeign(cfg, "f1") })
+	withF1, err := os.ReadFile(f.output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.source(t, "prod.yaml", "prod", "https://prod")
+
+	// Попытка 2 читает файл посреди чужой неатомарной записи, попытка 3 — уже дописанным.
+	broken := []byte("clusters: [{\n")
+	setBeforeWriteHook(t, func(call int) {
+		data := withF1
+		if call == 1 {
+			data = broken
+		}
+		if err := os.WriteFile(f.output, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		f.touch(t, call)
+	})
+	f.run(t)
+
+	b := f.backups(t)
+	if len(b) != 3 {
+		t.Fatalf("ожидалось 3 бэкапа (по одному на версию файла), есть %v", b)
+	}
+	var brokenCopies, f1Copies int
+	for _, p := range b {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case bytes.Equal(data, broken):
+			brokenCopies++
+		case bytes.Equal(data, withF1):
+			f1Copies++
+		}
+	}
+	if brokenCopies != 1 || f1Copies != 2 {
+		t.Errorf("бэкапы перезаписаны: битых копий %d, копий с f1 %d", brokenCopies, f1Copies)
+	}
+	kept, err := clientcmd.LoadFromFile(f.lostBackupPath(t))
+	if err != nil || kept.Contexts["f1"] == nil {
+		t.Errorf("бэкап из предупреждения должен содержать f1: err=%v", err)
+	}
+}
+
+func TestBackupFileNeverOverwrites(t *testing.T) {
+	now := time.Date(2026, 10, 16, 13, 19, 18, 0, time.Local)
+	backupNow = func() time.Time { return now }
+	t.Cleanup(func() { backupNow = time.Now })
+
+	dir := filepath.Join(t.TempDir(), "backups")
+	first, err := backupFile("kc.yaml", []byte("one"), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := backupFile("kc.yaml", []byte("two"), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, "kc.yaml.backup.20261016-131918"); first != want {
+		t.Errorf("первый бэкап %s, ожидался %s", first, want)
+	}
+	if second != first+"-2" {
+		t.Errorf("второй бэкап %s, ожидался %s-2", second, first)
+	}
+	for path, want := range map[string]string{first: "one", second: "two"} {
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != want {
+			t.Errorf("%s: %q, err=%v; ожидалось %q", path, got, err, want)
+		}
+		if info, err := os.Stat(path); err == nil && info.Mode().Perm() != 0o600 {
+			t.Errorf("%s: права %v, ожидались 0600", path, info.Mode().Perm())
+		}
+	}
+}
