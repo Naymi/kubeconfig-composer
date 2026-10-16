@@ -9,6 +9,11 @@
 #   KC_CHANNEL      stable (по умолчанию) или alpha: последний релиз, включая пререлизы
 #   KC_VERSION      конкретный тег (v0.0.2-alpha.1 или 0.0.2-alpha.1), имеет приоритет над каналом
 #   KC_INSTALL_DIR  каталог установки (по умолчанию ~/.local/bin)
+#   KC_SHELL_INIT   1 — подключить init в профиле оболочки: в rc-файл дописывается
+#                   блок с PATH и eval "$(kubeconfig-composer init)"; повторный запуск
+#                   заменяет блок, а не добавляет второй
+#   KC_SHELL_RC     какой rc-файл править; по умолчанию по $SHELL:
+#                   zsh — ${ZDOTDIR:-~}/.zshrc, bash — ~/.bashrc
 #   KC_API_URL      база GitHub API; для тестов
 #   KC_DOWNLOAD_URL база скачивания релизов; для тестов
 
@@ -23,6 +28,7 @@ INSTALL_DIR="${KC_INSTALL_DIR:-$HOME/.local/bin}"
 CHANNEL="${KC_CHANNEL:-stable}"
 
 TMP_DIR=""
+SHELL_INIT_DONE=""
 
 die() {
 	printf 'ошибка: %s\n' "$*" >&2
@@ -137,6 +143,84 @@ path_hint() {
 	esac
 }
 
+# sq <строка>: строка в одинарных кавычках для sh, с экранированием '
+sq() {
+	printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+BLOCK_BEGIN="# >>> kubeconfig-composer >>>"
+BLOCK_END="# <<< kubeconfig-composer <<<"
+
+# shell_rc: rc-файл для блока init; пусто, если оболочку не распознали
+shell_rc() {
+	if [ -n "${KC_SHELL_RC:-}" ]; then
+		echo "$KC_SHELL_RC"
+		return
+	fi
+	case "${SHELL:-}" in
+	*/zsh) echo "${ZDOTDIR:-$HOME}/.zshrc" ;;
+	*/bash) echo "$HOME/.bashrc" ;;
+	esac
+}
+
+# shell_block: блок для rc-файла. Бинарник вызывается по абсолютному пути,
+# чтобы init работал, даже если PATH настроен ниже по файлу. $PATH и $(...)
+# попадают в rc-файл как есть — их раскроет оболочка при старте.
+# shellcheck disable=SC2016
+shell_block() {
+	dir="$(sq "$INSTALL_DIR")"
+	printf '%s\n' "$BLOCK_BEGIN"
+	printf 'case ":$PATH:" in *:%s:*) ;; *) export PATH=%s:"$PATH" ;; esac\n' "$dir" "$dir"
+	printf 'eval "$(%s init)"\n' "$(sq "$INSTALL_DIR/$BINARY")"
+	printf '%s\n' "$BLOCK_END"
+}
+
+# setup_shell_init: при KC_SHELL_INIT=1 вписывает блок в rc-файл (заменяя
+# прежний) и ставит SHELL_INIT_DONE=1, иначе печатает подсказку. Пишет через `cat >`, поэтому rc-файл,
+# который является символической ссылкой (dotfiles), остаётся ссылкой.
+setup_shell_init() {
+	if [ "${KC_SHELL_INIT:-}" != 1 ]; then
+		info ""
+		info "Чтобы KUBECONFIG собирался при старте оболочки, перезапустите установку с KC_SHELL_INIT=1"
+		info "или добавьте в профиль: eval \"\$($(sq "$INSTALL_DIR/$BINARY") init)\""
+		return 0
+	fi
+
+	rc="$(shell_rc)"
+	if [ -z "$rc" ]; then
+		info ""
+		info "Не знаю, какой rc-файл у оболочки ${SHELL:-?}; задайте его через KC_SHELL_RC=<файл>"
+		return 0
+	fi
+
+	mkdir -p "$(dirname "$rc")"
+	new="$TMP_DIR/rc"
+	shell_block >"$TMP_DIR/block"
+	if [ -f "$rc" ] && grep -qxF "$BLOCK_BEGIN" "$rc"; then
+		awk -v begin="$BLOCK_BEGIN" -v end="$BLOCK_END" -v blockfile="$TMP_DIR/block" '
+			$0 == begin { while ((getline line < blockfile) > 0) print line; skip = 1; next }
+			skip && $0 == end { skip = 0; next }
+			!skip { print }
+		' "$rc" >"$new"
+		action="Обновлён"
+	else
+		if [ -s "$rc" ]; then
+			cat "$rc" >"$new"
+			# Отделяем блок пустой строкой; дописываем перевод строки, если его нет в конце.
+			[ "$(tail -c 1 "$rc")" = "" ] || printf '\n' >>"$new"
+			printf '\n' >>"$new"
+		else
+			: >"$new"
+		fi
+		cat "$TMP_DIR/block" >>"$new"
+		action="Добавлен"
+	fi
+	cat "$new" >"$rc"
+	SHELL_INIT_DONE=1
+	info ""
+	info "$action блок kubeconfig-composer в $rc; откройте новый терминал"
+}
+
 main() {
 	need curl
 	need tar
@@ -155,6 +239,7 @@ main() {
 	current="$(installed_version)"
 	if [ "$current" = "$version" ]; then
 		info "$BINARY $version уже актуальна ($INSTALL_DIR/$BINARY)"
+		setup_shell_init
 		return 0
 	fi
 
@@ -187,7 +272,9 @@ main() {
 	else
 		info "Установлено: $BINARY $version ($INSTALL_DIR/$BINARY)"
 	fi
-	path_hint
+	setup_shell_init
+	# Блок в rc-файле сам добавляет каталог в PATH; без него — подсказка.
+	[ "$SHELL_INIT_DONE" = 1 ] || path_hint
 }
 
 # Вся логика в функции: при обрыве `curl | sh` недокачанный скрипт не выполнится частично.
