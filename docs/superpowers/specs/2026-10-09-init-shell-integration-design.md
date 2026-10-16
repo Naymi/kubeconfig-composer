@@ -92,9 +92,13 @@ stdout пуст, код выхода 1 (`KUBECONFIG` не должен указ�
 
 - `cmd/init.go` — тонкая команда: флаги, вызов `initstate`, печать `export`.
 - `pkg/initstate/` — `fingerprint.go` (обход и хеш), `state.go` (init-state.json),
-  `lock_unix.go` (`syscall.Flock`) и `lock_other.go` (без блокировки: релизы
-  включают windows, а `init` рассчитан на bash/zsh), `carry.go` (перенос
-  `current-context`/`namespace`, поиск пропавших чужих записей), `run.go` (алгоритм).
+  `lock.go` (`WaitLock`: ожидание блокировки с таймаутом), `lock_unix.go`
+  (`syscall.Flock`) и `lock_windows.go` (заглушка без блокировки: релизы включают
+  windows, а `init` рассчитан на bash/zsh), `carry.go` (перенос
+  `current-context`/`namespace`, поиск пропавших чужих записей), `export.go`
+  (`ShellExport`: строка `export` с экранированием кавычек), `quiet.go`
+  (`CaptureStdout`: перехват вывода `Composer`, чтобы в stdout не попало ничего,
+  кроме `export`), `run.go` (алгоритм).
 - `pkg/composer`: `ScanDirectory` и `scanner.FindKubeconfigFiles` пропускают каталоги
   `cache`, `http-cache` и скрытые каталоги (`scanner.IsSkippedDir`; корень обхода не
   проверяется, потому что `~/.kube` скрытый) и возвращают файлы, отсортированные по
@@ -111,8 +115,9 @@ stdout пуст, код выхода 1 (`KUBECONFIG` не должен указ�
 
 Ничто в тестах не трогает настоящие `~/.kube` и `~/.kubeconfig-composer`.
 
-- **Unit-тесты** (`pkg/initstate`, `pkg/scanner`, `pkg/composer`): каждый тест делает
-  `t.Setenv("HOME", t.TempDir())` и работает только во временных каталогах. Покрыто:
+- **Unit-тесты** (`pkg/initstate`, `pkg/scanner`, `pkg/composer`): тесты работают
+  только в `t.TempDir()`, `StateDir` передаётся явно, `HOME` не используется (e2e
+  выставляет `HOME` только в окружении дочернего процесса). Покрыто:
   отпечаток (стабильность, изменение mtime/размера/префикса), решение по порогу,
   перенос `current-context` и `namespace` (в том числе когда контекст исчез и когда
   дубликат схлопнулся), пропавшие чужие записи, пропуск `cache/` в сканере.
