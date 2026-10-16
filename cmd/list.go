@@ -40,6 +40,9 @@ func runList(cmd *cobra.Command, args []string) error {
 		}
 
 		if info.IsDir() {
+			if path != listDir && scanner.IsSkippedDir(info.Name()) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 

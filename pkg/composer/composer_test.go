@@ -3,6 +3,7 @@ package composer
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 
 	"github.com/naymi/kubeconfig-composer/pkg/scanner"
@@ -576,5 +577,57 @@ func TestIsKubeconfigFile(t *testing.T) {
 				t.Errorf("Expected %v, got %v", tt.expected, result)
 			}
 		})
+	}
+}
+
+func writeCfgFile(t *testing.T, path, ctx, server string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := clientcmd.WriteToFile(*makeConfig(ctx, ctx+"-c", ctx+"-u", server, "t"), path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestScanDirectorySkipsServiceDirs(t *testing.T) {
+	root := filepath.Join(t.TempDir(), ".kube")
+	writeCfgFile(t, filepath.Join(root, "config"), "main", "https://a")
+	writeCfgFile(t, filepath.Join(root, "cache", "http", "x.yaml"), "cached", "https://b")
+	writeCfgFile(t, filepath.Join(root, "http-cache", "y.yaml"), "cached2", "https://c")
+
+	c := New(true)
+	if err := c.ScanDirectory(root); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(c.GetLoadedFiles()); got != 1 {
+		t.Fatalf("ожидался 1 файл, найдено %d", got)
+	}
+}
+
+func TestScanDirectoryOrderIsDeterministic(t *testing.T) {
+	root := t.TempDir()
+	names := []string{"e.yaml", "b.yaml", "d.yaml", "a.yaml", "c.yaml"}
+	for _, n := range names {
+		writeCfgFile(t, filepath.Join(root, n), n[:1], "https://"+n)
+	}
+	var first []string
+	for i := 0; i < 20; i++ {
+		c := New(true)
+		if err := c.ScanDirectory(root); err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, f := range c.GetLoadedFiles() {
+			got = append(got, filepath.Base(f.GetFullPath()))
+		}
+		if !sort.StringsAreSorted(got) {
+			t.Fatalf("порядок не отсортирован: %v", got)
+		}
+		if i == 0 {
+			first = got
+		} else if len(got) != len(first) {
+			t.Fatalf("число файлов меняется: %v vs %v", got, first)
+		}
 	}
 }

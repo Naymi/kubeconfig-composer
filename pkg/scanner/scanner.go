@@ -9,6 +9,17 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
+// skippedDirs — служебные каталоги kubectl в ~/.kube: kubeconfig'ов там нет, а
+// файлов тысячи (кэш discovery и HTTP-кэш, у автора ~10 тысяч файлов и 1,5 ГБ).
+var skippedDirs = map[string]bool{"cache": true, "http-cache": true}
+
+// IsSkippedDir сообщает, нужно ли пропустить каталог name при поиске
+// kubeconfig: служебные каталоги kubectl и скрытые каталоги. Корень обхода
+// вызывающий код не проверяет — он сам может быть скрытым (~/.kube).
+func IsSkippedDir(name string) bool {
+	return skippedDirs[name] || strings.HasPrefix(name, ".")
+}
+
 // IsKubeconfigFile проверяет, является ли файл kubeconfig
 func IsKubeconfigFile(path string, info os.FileInfo) bool {
 	name := info.Name()
@@ -53,6 +64,9 @@ func FindKubeconfigFiles(dir string) ([]string, error) {
 		}
 
 		if info.IsDir() {
+			if path != dir && IsSkippedDir(info.Name()) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 

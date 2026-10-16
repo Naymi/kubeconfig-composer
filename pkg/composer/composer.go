@@ -221,6 +221,9 @@ func (c *Composer) ScanDirectory(dir string, exclude ...string) error {
 		}
 
 		if info.IsDir() {
+			if path != dir && scanner.IsSkippedDir(info.Name()) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 
@@ -253,6 +256,7 @@ func (c *Composer) ScanDirectory(dir string, exclude ...string) error {
 
 	resultChan := make(chan loadResult, len(kubeconfigPaths))
 
+	start := len(c.configs)
 	for _, path := range kubeconfigPaths {
 		go func(p string) {
 			config, err := clientcmd.LoadFromFile(p)
@@ -284,6 +288,13 @@ func (c *Composer) ScanDirectory(dir string, exclude ...string) error {
 		c.configs = append(c.configs, result.config)
 	}
 	close(resultChan)
+
+	// Горутины завершаются в произвольном порядке; сортируем добавленные этим
+	// сканированием конфиги по пути, чтобы результат merge (в том числе
+	// current-context «первого файла») не зависел от планировщика. Ранее
+	// загруженная база (start) остаётся первой.
+	added := c.configs[start:]
+	sort.Slice(added, func(i, j int) bool { return added[i].fullPath < added[j].fullPath })
 
 	return nil
 }
