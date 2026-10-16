@@ -141,11 +141,12 @@ func rebuild(opts Options, dir, output string, logf func(string, ...any)) (bool,
 		sess.ApplyNamespaces(c.Result())
 
 		if lost := sess.LostForeign(c.Result(), opts.Prefix); len(lost) > 0 {
+			list := formatLost(lost)
 			backup, berr := backupFile(output, filepath.Join(opts.StateDir, "backups"))
 			if berr != nil {
-				logf("⚠ в новом %s нет записей, которых нет среди источников: %v; сохранить прежний файл не удалось: %v", output, lost, berr)
+				logf("⚠ в новом %s нет записей, которых нет среди источников: %s; сохранить прежний файл не удалось: %v", output, list, berr)
 			} else {
-				logf("⚠ в новом %s нет записей, которых нет среди источников: %v; прежний файл сохранён: %s", output, lost, backup)
+				logf("⚠ в новом %s нет записей, которых нет среди источников: %s; прежний файл сохранён: %s", output, list, backup)
 			}
 		}
 	}
@@ -159,6 +160,19 @@ func rebuild(opts Options, dir, output string, logf func(string, ...any)) (bool,
 		return false, err
 	}
 	return true, nil
+}
+
+// maxLostListed — сколько имён пропавших чужих записей попадает в предупреждение.
+const maxLostListed = 10
+
+// formatLost форматирует первые maxLostListed имён; про остальные пишет «и ещё N».
+func formatLost(lost []string) string {
+	shown := lost[:min(maxLostListed, len(lost))]
+	out := fmt.Sprintf("%v", shown)
+	if rest := len(lost) - len(shown); rest > 0 {
+		out += fmt.Sprintf(" и ещё %d", rest)
+	}
+	return out
 }
 
 // backupFile копирует src в backupDir под именем, которое понимает revert:

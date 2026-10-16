@@ -2,6 +2,7 @@ package initstate
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -259,6 +260,42 @@ func TestRunReportsLostForeignEntriesAndBacksUp(t *testing.T) {
 	kept, err := clientcmd.LoadFromFile(backups[0])
 	if err != nil || kept.Contexts["mine"] == nil {
 		t.Errorf("бэкап должен содержать прежний файл с чужой записью: err=%v", err)
+	}
+}
+
+func TestRunLostForeignWarningLimitedToTen(t *testing.T) {
+	f := newFixture(t)
+	f.source(t, "dev.yaml", "dev", "https://dev")
+	f.run(t)
+
+	// Инструмент дописал в kc.yaml 12 чужих записей (имя общее у кластера, пользователя и контекста).
+	cfg := f.load(t)
+	for i := 1; i <= 12; i++ {
+		name := fmt.Sprintf("foreign%02d", i)
+		cfg.Clusters[name] = &clientcmdapi.Cluster{Server: "https://" + name}
+		cfg.AuthInfos[name] = &clientcmdapi.AuthInfo{Token: "x"}
+		cfg.Contexts[name] = &clientcmdapi.Context{Cluster: name, AuthInfo: name}
+	}
+	if err := clientcmd.WriteToFile(*cfg, f.output); err != nil {
+		t.Fatal(err)
+	}
+
+	f.source(t, "prod.yaml", "prod", "https://prod")
+	f.run(t)
+
+	msg := f.log.String()
+	if got := strings.Count(msg, "foreign"); got != 10 {
+		t.Errorf("в предупреждении должно быть ровно 10 имён, найдено %d: %q", got, msg)
+	}
+	if !strings.Contains(msg, "foreign10") || strings.Contains(msg, "foreign11") {
+		t.Errorf("ожидались первые 10 имён по алфавиту: %q", msg)
+	}
+	if !strings.Contains(msg, "и ещё 2") {
+		t.Errorf("в предупреждении нет числа оставшихся: %q", msg)
+	}
+	backups, _ := filepath.Glob(filepath.Join(f.state, "backups", "kc.yaml.backup.*"))
+	if len(backups) != 1 {
+		t.Fatalf("ожидался 1 бэкап, найдено %v", backups)
 	}
 }
 
