@@ -22,8 +22,10 @@ type Snapshot struct {
 }
 
 // Scan обходит dir через stat, не читая содержимое файлов. Пропускаются
-// скрытые файлы (в том числе временные .kc.yaml.tmp-*), сам output и каталоги
-// из scanner.IsSkippedDir; корень обхода не проверяется — ~/.kube скрытый.
+// скрытые файлы (в том числе временные .kc.yaml.tmp-*), служебные файлы из
+// scanner.IsServiceFile (kubectx, *.lock), сам output и каталоги из
+// scanner.IsSkippedDir (в том числе kubens/); корень обхода не проверяется —
+// ~/.kube скрытый.
 // Символические ссылки на файлы учитываются по цели (os.Stat). salt
 // подмешивается в хеш: версия бинарника и параметры сборки, чтобы их смена
 // тоже вызывала пересборку.
@@ -48,7 +50,7 @@ func Scan(dir, output string, salt ...string) (*Snapshot, error) {
 			}
 			return nil
 		}
-		if strings.HasPrefix(d.Name(), ".") {
+		if strings.HasPrefix(d.Name(), ".") || scanner.IsServiceFile(d.Name()) {
 			return nil
 		}
 		if abs, aerr := filepath.Abs(path); aerr == nil && abs == absOutput {

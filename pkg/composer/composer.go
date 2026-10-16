@@ -214,10 +214,20 @@ func (c *Composer) ScanDirectory(dir string, exclude ...string) error {
 
 	var kubeconfigPaths []string
 
-	// Сначала собираем все пути к файлам
+	// Сначала собираем все пути к файлам. Недоступный корень — ошибка;
+	// недоступный файл или подкаталог внутри пропускаем с предупреждением, как
+	// и обход для отпечатка init (initstate.Scan): иначе одна нечитаемая папка
+	// ломает каждую сборку.
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return err
+			if path == dir {
+				return err
+			}
+			pterm.FgYellow.Printf("⚠ пропускаю %s: %v\n", path, err)
+			if info != nil && info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 
 		if info.IsDir() {

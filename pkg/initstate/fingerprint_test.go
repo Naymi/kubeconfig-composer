@@ -82,6 +82,31 @@ func TestScanIgnoresServiceFilesAndOutput(t *testing.T) {
 	}
 }
 
+// kubectx, kubens и client-go пишут своё состояние в ~/.kube при каждом
+// переключении контекста; отпечаток от этого меняться не должен.
+func TestScanIgnoresContextSwitcherState(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), ".kube")
+	output := filepath.Join(dir, "kc.yaml")
+	touch(t, filepath.Join(dir, "config"), "aaaa", t0)
+	base := mustScan(t, dir, output)
+
+	touch(t, filepath.Join(dir, "kubectx"), "prev-ctx", t0)
+	touch(t, filepath.Join(dir, "kubens", "ctx"), "prev-ns", t0)
+	touch(t, filepath.Join(dir, "config.lock"), "", t0)
+	touch(t, filepath.Join(dir, "kc.yaml.lock"), "", t0)
+
+	got := mustScan(t, dir, output)
+	if got.Hash != base.Hash || got.Files != base.Files {
+		t.Fatalf("служебные файлы kubectx/kubens/client-go повлияли на отпечаток: %+v vs %+v", got, base)
+	}
+
+	// Контроль: настоящий новый источник отпечаток меняет.
+	touch(t, filepath.Join(dir, "x.yaml"), "bb", t0)
+	if mustScan(t, dir, output).Hash == base.Hash {
+		t.Error("новый источник x.yaml не меняет отпечаток")
+	}
+}
+
 func TestScanFollowsSymlinks(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, ".kube")

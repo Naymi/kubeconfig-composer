@@ -9,22 +9,32 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// skippedDirs — служебные каталоги kubectl в ~/.kube: kubeconfig'ов там нет, а
-// файлов тысячи (кэш discovery и HTTP-кэш, у автора ~10 тысяч файлов и 1,5 ГБ).
-var skippedDirs = map[string]bool{"cache": true, "http-cache": true}
+// skippedDirs — служебные каталоги в ~/.kube, где kubeconfig'ов нет: кэш
+// discovery и HTTP-кэш kubectl (файлов там тысячи, у автора ~10 тысяч и 1,5 ГБ)
+// и kubens/, где kubens хранит прежний namespace каждого контекста
+// (~/.kube/kubens/<context>) и переписывает его при каждом переключении.
+var skippedDirs = map[string]bool{"cache": true, "http-cache": true, "kubens": true}
 
 // IsSkippedDir сообщает, нужно ли пропустить каталог name при поиске
-// kubeconfig: служебные каталоги kubectl и скрытые каталоги. Корень обхода
-// вызывающий код не проверяет — он сам может быть скрытым (~/.kube).
+// kubeconfig: служебные каталоги kubectl и kubens и скрытые каталоги. Корень
+// обхода вызывающий код не проверяет — он сам может быть скрытым (~/.kube).
 func IsSkippedDir(name string) bool {
 	return skippedDirs[name] || strings.HasPrefix(name, ".")
+}
+
+// IsServiceFile сообщает, что файл name служебный и источником не бывает,
+// хотя лежит рядом с kubeconfig'ами: kubectx пишет прежний контекст в
+// ~/.kube/kubectx, client-go на время записи kubeconfig создаёт рядом
+// <kubeconfig>.lock. Оба меняются при каждом переключении контекста.
+func IsServiceFile(name string) bool {
+	return name == "kubectx" || strings.HasSuffix(name, ".lock")
 }
 
 // IsKubeconfigFile проверяет, является ли файл kubeconfig
 func IsKubeconfigFile(path string, info os.FileInfo) bool {
 	name := info.Name()
 
-	if strings.HasPrefix(name, ".") {
+	if strings.HasPrefix(name, ".") || IsServiceFile(name) {
 		return false
 	}
 
@@ -54,13 +64,21 @@ func IsKubeconfigFile(path string, info os.FileInfo) bool {
 	return hasContexts || hasClusters || hasUsers
 }
 
-// FindKubeconfigFiles сканирует директорию и возвращает список kubeconfig файлов
+// FindKubeconfigFiles сканирует директорию и возвращает список kubeconfig
+// файлов. Ошибкой заканчивается только недоступный корень; недоступный файл
+// или подкаталог внутри молча пропускается, как и файл, который не загружается.
 func FindKubeconfigFiles(dir string) ([]string, error) {
 	var files []string
 
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return err
+			if path == dir {
+				return err
+			}
+			if info != nil && info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 
 		if info.IsDir() {

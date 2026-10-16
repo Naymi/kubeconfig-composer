@@ -32,11 +32,49 @@ func TestIsSkippedDir(t *testing.T) {
 		".hidden":    true,
 		"prod":       false,
 		"caches":     false,
-		"kubens":     false,
+		"kubens":     true,
+		"kubens-old": false,
 	}
 	for name, want := range cases {
 		if got := IsSkippedDir(name); got != want {
 			t.Errorf("IsSkippedDir(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestIsServiceFile(t *testing.T) {
+	cases := map[string]bool{
+		"kubectx":      true,
+		"config.lock":  true,
+		"kc.yaml.lock": true,
+		".lock":        true,
+		"config":       false,
+		"kc.yaml":      false,
+		"kubectx.yaml": false,
+		"kubens":       false,
+		"lock.yaml":    false,
+		"locked":       false,
+	}
+	for name, want := range cases {
+		if got := IsServiceFile(name); got != want {
+			t.Errorf("IsServiceFile(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestIsKubeconfigFileRejectsServiceFiles(t *testing.T) {
+	dir := t.TempDir()
+	// Содержимое — настоящий kubeconfig: отказ должен идти по имени, а не по
+	// содержимому (config.lock к тому же подходил бы под проверку содержимого).
+	for _, name := range []string{"kubectx", "config.lock", "kc.yaml.lock"} {
+		path := filepath.Join(dir, name)
+		writeKubeconfig(t, path)
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if IsKubeconfigFile(path, info) {
+			t.Errorf("IsKubeconfigFile(%q) = true, служебный файл не источник", name)
 		}
 	}
 }
