@@ -23,8 +23,16 @@ curl -fsSL https://github.com/Naymi/kubeconfig-composer/releases/download/<те�
 | `KC_CHANNEL` | `stable` (по умолчанию) или `alpha` |
 | `KC_VERSION` | конкретная версия, например `v0.0.2-alpha.1`; приоритетнее канала |
 | `KC_INSTALL_DIR` | каталог установки, по умолчанию `~/.local/bin` |
+| `KC_SHELL_INIT` | `1` — подключить [`init`](#init-сборка-при-старте-shell) в профиле оболочки |
+| `KC_SHELL_RC` | какой rc-файл править; по умолчанию по `$SHELL`: zsh — `${ZDOTDIR:-~}/.zshrc`, bash — `~/.bashrc` |
 
-Если `~/.local/bin` нет в `PATH`, скрипт напечатает, что добавить в профиль оболочки. Установленную версию показывает `kubeconfig-composer --version`.
+С `KC_SHELL_INIT=1` скрипт дописывает в rc-файл блок между строками `# >>> kubeconfig-composer >>>` и `# <<< kubeconfig-composer <<<`: каталог установки в `PATH` и `eval "$(kubeconfig-composer init)"`. Повторный запуск заменяет блок, а не добавляет второй; если rc-файл — символическая ссылка (dotfiles), правится её цель. Чтобы отключить, удалите блок.
+
+```bash
+curl -fsSL https://github.com/Naymi/kubeconfig-composer/releases/download/<тег>/install.sh | KC_CHANNEL=alpha KC_SHELL_INIT=1 sh
+```
+
+Без `KC_SHELL_INIT` rc-файлы не трогаются. Если `~/.local/bin` нет в `PATH`, скрипт напечатает, что добавить в профиль оболочки. Установленную версию показывает `kubeconfig-composer --version`.
 
 Или через Go:
 
@@ -83,7 +91,7 @@ kubeconfig-composer merge --prefix src
 
 ### init: сборка при старте shell
 
-Добавьте в `~/.bashrc` или `~/.zshrc`:
+Добавьте в `~/.bashrc` или `~/.zshrc` (или установите с `KC_SHELL_INIT=1`, скрипт сделает это сам):
 
 ```bash
 eval "$(kubeconfig-composer init)"
