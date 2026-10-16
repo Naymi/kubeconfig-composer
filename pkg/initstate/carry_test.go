@@ -72,7 +72,7 @@ func TestApplyNamespacesSkipsEmptyAndMissing(t *testing.T) {
 	cfg := cfgWith("a", "b")
 	cfg.Contexts["b"].Namespace = "from-source"
 
-	s.ApplyNamespaces(cfg)
+	s.ApplyNamespaces(cfg, nil)
 
 	if cfg.Contexts["a"].Namespace != "team-a" {
 		t.Errorf("namespace a = %q", cfg.Contexts["a"].Namespace)
@@ -82,23 +82,50 @@ func TestApplyNamespacesSkipsEmptyAndMissing(t *testing.T) {
 	}
 }
 
+func TestApplyNamespacesSourceWinsWhenUserDidNotChangeIt(t *testing.T) {
+	// a: в прежнем файле namespace тот, что прошлый раз дал источник, — его
+	// никто не трогал, новое значение из источника побеждает.
+	// b: пользователь сменил namespace (kubens) — его выбор сохраняется.
+	// c: контекста не было в прошлой сборке — переносим прежний, как раньше.
+	s := &Session{Namespaces: map[string]string{"a": "old-ns", "b": "mine", "c": "kept"}}
+	prevSource := map[string]string{"a": "old-ns", "b": "old-b"}
+	cfg := cfgWith("a", "b", "c")
+	cfg.Contexts["a"].Namespace = "new-ns"
+	cfg.Contexts["b"].Namespace = "new-b"
+	cfg.Contexts["c"].Namespace = "from-source"
+
+	s.ApplyNamespaces(cfg, prevSource)
+
+	if got := cfg.Contexts["a"].Namespace; got != "new-ns" {
+		t.Errorf("a = %q, ожидалось new-ns", got)
+	}
+	if got := cfg.Contexts["b"].Namespace; got != "mine" {
+		t.Errorf("b = %q, ожидалось mine", got)
+	}
+	if got := cfg.Contexts["c"].Namespace; got != "kept" {
+		t.Errorf("c = %q, ожидалось kept", got)
+	}
+}
+
 func TestLostForeign(t *testing.T) {
 	s := &Session{Names: map[string]bool{
-		"kc:gone:old.yaml": true, // источник удалён: молчим
+		"kc:gone:old.yaml": true, // записан прошлой сборкой, источник удалён: молчим
 		"kc:kept:a.yaml":   true,
+		"kc:added:x.yaml":  true, // с префиксом, но дописан не нами
 		"mine":             true, // чужая запись пропала
 		"zeta":             true,
 	}}
 	cfg := clientcmdapi.NewConfig()
 	cfg.Contexts["kc:kept:a.yaml"] = &clientcmdapi.Context{}
+	owned := map[string]bool{"kc:gone:old.yaml": true, "kc:kept:a.yaml": true}
 
-	got := s.LostForeign(cfg, "kc")
-	if want := []string{"mine", "zeta"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("с префиксом: got %v, want %v", got, want)
+	got := s.LostForeign(cfg, owned)
+	if want := []string{"kc:added:x.yaml", "mine", "zeta"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("с прошлой сборкой: got %v, want %v", got, want)
 	}
 
-	got = s.LostForeign(cfg, "")
-	if want := []string{"kc:gone:old.yaml", "mine", "zeta"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("без префикса: got %v, want %v", got, want)
+	got = s.LostForeign(cfg, nil)
+	if want := []string{"kc:added:x.yaml", "kc:gone:old.yaml", "mine", "zeta"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("без состояния: got %v, want %v", got, want)
 	}
 }

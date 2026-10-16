@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io/fs"
 	"sort"
-	"strings"
 
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -15,7 +14,38 @@ import (
 type Session struct {
 	CurrentContext string
 	Namespaces     map[string]string // имя контекста -> namespace
-	Names          map[string]bool   // имена кластеров, пользователей и контекстов
+	Names          map[string]bool   // имена кластеров, пользователей и контекстов прежнего файла; LostForeign сверяет их с State.Names
+}
+
+// configNames возвращает отсортированные без повторов имена кластеров,
+// пользователей и контекстов cfg — то, что сохраняется в State.Names.
+func configNames(cfg *clientcmdapi.Config) []string {
+	set := map[string]bool{}
+	for name := range cfg.Clusters {
+		set[name] = true
+	}
+	for name := range cfg.AuthInfos {
+		set[name] = true
+	}
+	for name := range cfg.Contexts {
+		set[name] = true
+	}
+	names := make([]string, 0, len(set))
+	for name := range set {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// contextNamespaces возвращает namespace каждого контекста cfg — то, что
+// сохраняется в State.SourceNamespaces.
+func contextNamespaces(cfg *clientcmdapi.Config) map[string]string {
+	ns := make(map[string]string, len(cfg.Contexts))
+	for name, ctx := range cfg.Contexts {
+		ns[name] = ctx.Namespace
+	}
+	return ns
 }
 
 // ReadSession читает прежний kc.yaml. Если файла нет, возвращает (nil, nil).
@@ -56,11 +86,20 @@ func (s *Session) ApplyCurrentContext(cfg *clientcmdapi.Config) {
 	}
 }
 
-// ApplyNamespaces переносит непустые прежние namespace на контексты, которые
-// есть в cfg. Пустой прежний namespace значение из источника не затирает.
-func (s *Session) ApplyNamespaces(cfg *clientcmdapi.Config) {
+// ApplyNamespaces возвращает namespace, выбранный пользователем прямо в
+// прежнем файле (kubens, kubectl config set-context), на контексты, которые
+// есть в cfg. prevSource — namespace контекстов в сборке из источников на
+// прошлой пересборке (State.SourceNamespaces). Прежний namespace переносится,
+// если он непустой и отличается от того, что тогда дал источник, или если
+// контекста в prevSource нет (в том числе prevSource == nil — состояния нет).
+// Если прежний namespace совпадает с прошлым значением источника, его никто не
+// менял, и побеждает текущее значение из источника.
+func (s *Session) ApplyNamespaces(cfg *clientcmdapi.Config, prevSource map[string]string) {
 	for name, ns := range s.Namespaces {
 		if ns == "" {
+			continue
+		}
+		if src, ok := prevSource[name]; ok && src == ns {
 			continue
 		}
 		if ctx, ok := cfg.Contexts[name]; ok {
@@ -70,14 +109,15 @@ func (s *Session) ApplyNamespaces(cfg *clientcmdapi.Config) {
 }
 
 // LostForeign возвращает отсортированные имена, которые были в прежнем файле,
-// пропали в cfg и не начинаются с "<prefix>:" — то есть записи, добавленные не
-// нами (например, `aws eks update-kubeconfig`). Пропавшие записи с префиксом —
-// это удалённые источники, о них не сообщаем. При пустом prefix отличить свои
-// записи нельзя, поэтому возвращаются все пропавшие.
-func (s *Session) LostForeign(cfg *clientcmdapi.Config, prefix string) []string {
+// пропали в cfg и не записаны init на прошлой сборке (owned — State.Names).
+// Это записи, добавленные в файл не init: `aws eks update-kubeconfig`, `merge`,
+// ручная правка — с префиксом или без. Пропавшие записи из owned — это
+// удалённые источники, о них не сообщаем. Если состояния нет (owned пуст),
+// чужими считаются все пропавшие: файл собирал не init.
+func (s *Session) LostForeign(cfg *clientcmdapi.Config, owned map[string]bool) []string {
 	var lost []string
 	for name := range s.Names {
-		if prefix != "" && strings.HasPrefix(name, prefix+":") {
+		if owned[name] {
 			continue
 		}
 		_, inCluster := cfg.Clusters[name]

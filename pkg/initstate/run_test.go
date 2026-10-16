@@ -75,6 +75,33 @@ func (f *fixture) load(t *testing.T) *clientcmdapi.Config {
 	return cfg
 }
 
+// paths возвращает файлы состояния и блокировки init для пары этой фикстуры.
+func (f *fixture) paths(t *testing.T) (statePath, lockPath string) {
+	t.Helper()
+	dir, output, _, err := resolvePaths(f.opts.Dir, f.opts.Output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return statePaths(f.opts.StateDir, dir, output)
+}
+
+func (f *fixture) backups(t *testing.T) []string {
+	t.Helper()
+	b, _ := filepath.Glob(filepath.Join(f.state, "backups", "kc.yaml.backup.*"))
+	return b
+}
+
+// edit загружает kc.yaml, даёт его поправить и записывает обратно — как это
+// делают kubectl, kubens или aws eks update-kubeconfig.
+func (f *fixture) edit(t *testing.T, fn func(cfg *clientcmdapi.Config)) {
+	t.Helper()
+	cfg := f.load(t)
+	fn(cfg)
+	if err := clientcmd.WriteToFile(*cfg, f.output); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func contextNames(cfg *clientcmdapi.Config) []string {
 	var names []string
 	for n := range cfg.Contexts {
@@ -400,5 +427,231 @@ func TestRunRelativeDir(t *testing.T) {
 	}
 	if got := contextNames(f.load(t)); len(got) != 1 {
 		t.Errorf("контексты: %v", got)
+	}
+}
+
+func TestRunEmptyDirWarnsAboutZeroSources(t *testing.T) {
+	f := newFixture(t)
+	f.run(t)
+	if !strings.Contains(f.log.String(), "не найдено ни одного файла-источника") {
+		t.Errorf("в stderr нет предупреждения про пустой каталог: %q", f.log)
+	}
+}
+
+func TestRunBacksUpOutputItDidNotBuild(t *testing.T) {
+	f := newFixture(t)
+	// kc.yaml собран не init (например, merge), состояния init для пары нет.
+	if err := clientcmd.WriteToFile(*cfgWith("kc:prod:prod.yaml"), f.output); err != nil {
+		t.Fatal(err)
+	}
+	f.run(t)
+
+	if !strings.Contains(f.log.String(), "kc:prod:prod.yaml") {
+		t.Errorf("в stderr нет имени пропавшей записи: %q", f.log)
+	}
+	if b := f.backups(t); len(b) != 1 {
+		t.Fatalf("ожидался 1 бэкап, найдено %v", b)
+	}
+}
+
+func TestRunBacksUpForeignEntryWithPrefix(t *testing.T) {
+	f := newFixture(t)
+	f.source(t, "dev.yaml", "dev", "https://dev")
+	f.run(t)
+
+	// Запись с префиксом kc:, но дописанная в kc.yaml не init.
+	const name = "kc:other:x.yaml"
+	f.edit(t, func(cfg *clientcmdapi.Config) {
+		cfg.Clusters[name] = &clientcmdapi.Cluster{Server: "https://other"}
+		cfg.AuthInfos[name] = &clientcmdapi.AuthInfo{Token: "x"}
+		cfg.Contexts[name] = &clientcmdapi.Context{Cluster: name, AuthInfo: name}
+	})
+	f.source(t, "prod.yaml", "prod", "https://prod")
+	f.run(t)
+
+	if !strings.Contains(f.log.String(), name) {
+		t.Errorf("в stderr нет имени пропавшей записи: %q", f.log)
+	}
+	if b := f.backups(t); len(b) != 1 {
+		t.Fatalf("ожидался 1 бэкап, найдено %v", b)
+	}
+}
+
+// setSourceNamespace меняет namespace контекста ctx в источнике file.
+func (f *fixture) setSourceNamespace(t *testing.T, file, ctx, ns string) {
+	t.Helper()
+	path := filepath.Join(f.dir, file)
+	cfg, err := clientcmd.LoadFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Contexts[ctx].Namespace = ns
+	if err := clientcmd.WriteToFile(*cfg, path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunSourceNamespaceChangeReachesOutput(t *testing.T) {
+	f := newFixture(t)
+	f.source(t, "a.yaml", "a", "https://a")
+	f.setSourceNamespace(t, "a.yaml", "a", "old-ns")
+	f.run(t)
+	if got := f.load(t).Contexts["kc:a:a.yaml"].Namespace; got != "old-ns" {
+		t.Fatalf("namespace после первой сборки = %q", got)
+	}
+
+	f.setSourceNamespace(t, "a.yaml", "a", "new-ns")
+	if res := f.run(t); !res.Rebuilt {
+		t.Fatal("ожидалась пересборка")
+	}
+	if got := f.load(t).Contexts["kc:a:a.yaml"].Namespace; got != "new-ns" {
+		t.Errorf("правка namespace в источнике не дошла до kc.yaml: %q", got)
+	}
+}
+
+func TestRunUserNamespaceSurvivesSourceChange(t *testing.T) {
+	f := newFixture(t)
+	f.source(t, "a.yaml", "a", "https://a")
+	f.setSourceNamespace(t, "a.yaml", "a", "src-ns")
+	f.run(t)
+
+	// kubens прямо в kc.yaml, затем меняется другой источник.
+	f.edit(t, func(cfg *clientcmdapi.Config) { cfg.Contexts["kc:a:a.yaml"].Namespace = "mine" })
+	f.source(t, "b.yaml", "b", "https://b")
+	f.run(t)
+
+	if got := f.load(t).Contexts["kc:a:a.yaml"].Namespace; got != "mine" {
+		t.Errorf("namespace, выбранный пользователем, = %q, ожидалось mine", got)
+	}
+}
+
+func TestRunWithoutStateCarriesNamespace(t *testing.T) {
+	f := newFixture(t)
+	f.source(t, "a.yaml", "a", "https://a")
+	f.setSourceNamespace(t, "a.yaml", "a", "src-ns")
+	f.run(t)
+	f.edit(t, func(cfg *clientcmdapi.Config) { cfg.Contexts["kc:a:a.yaml"].Namespace = "mine" })
+
+	statePath, _ := f.paths(t)
+	if err := os.Remove(statePath); err != nil {
+		t.Fatal(err)
+	}
+	f.run(t)
+	if got := f.load(t).Contexts["kc:a:a.yaml"].Namespace; got != "mine" {
+		t.Errorf("без состояния namespace переносится из прежнего файла, got %q", got)
+	}
+}
+
+func TestRunStateIsPerPair(t *testing.T) {
+	f1 := newFixture(t)
+	f2 := newFixture(t)
+	// Общий каталог состояния у двух пар.
+	f2.opts.StateDir = f1.state
+	f2.state = f1.state
+	f1.source(t, "a.yaml", "a", "https://a")
+	f2.source(t, "b.yaml", "b", "https://b")
+	f1.run(t)
+	f2.run(t)
+
+	s1, _ := f1.paths(t)
+	s2, _ := f2.paths(t)
+	if s1 == s2 {
+		t.Fatalf("у разных пар один файл состояния %s", s1)
+	}
+	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, p := range []string{s1, s2} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		for _, f := range []*fixture{f1, f2} {
+			if res := f.run(t); res.Rebuilt {
+				t.Fatalf("повтор %d: пересборка без изменений источников", i)
+			}
+		}
+	}
+	for _, p := range []string{s1, s2} {
+		if info, err := os.Stat(p); err != nil || !info.ModTime().Equal(old) {
+			t.Errorf("файл состояния %s переписан без изменений: err=%v", p, err)
+		}
+	}
+	files, _ := filepath.Glob(filepath.Join(f1.state, "init-state-*.json"))
+	if len(files) != 2 {
+		t.Errorf("ожидалось 2 файла состояния, найдено %v", files)
+	}
+}
+
+func TestRunWaitsForKubectlLock(t *testing.T) {
+	f := newFixture(t)
+	f.opts.KubeconfigLockTimeout = 5 * time.Second
+	f.source(t, "dev.yaml", "dev", "https://dev")
+	f.run(t)
+
+	f.source(t, "prod.yaml", "prod", "https://prod")
+	lock := f.output + ".lock"
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		os.Remove(lock)
+	}()
+	if res := f.run(t); !res.Rebuilt {
+		t.Fatal("после снятия lock ожидалась пересборка")
+	}
+	if got := contextNames(f.load(t)); len(got) != 2 {
+		t.Errorf("контексты: %v", got)
+	}
+}
+
+func TestRunBusyKubectlLockLeavesOutputAndState(t *testing.T) {
+	f := newFixture(t)
+	f.opts.KubeconfigLockTimeout = 50 * time.Millisecond
+	f.source(t, "dev.yaml", "dev", "https://dev")
+	f.run(t)
+	statePath, _ := f.paths(t)
+	before, _ := os.ReadFile(f.output)
+	stateBefore, _ := os.ReadFile(statePath)
+
+	f.source(t, "prod.yaml", "prod", "https://prod")
+	lock := f.output + ".lock"
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Run(f.opts)
+	if err == nil || res.Rebuilt || !res.ExportOK {
+		t.Fatalf("занятый lock: ожидалась ошибка без пересборки, res=%+v err=%v", res, err)
+	}
+	if !strings.Contains(f.log.String(), lock) {
+		t.Errorf("в stderr нет пути lock-файла: %q", f.log)
+	}
+	if after, _ := os.ReadFile(f.output); !bytes.Equal(before, after) {
+		t.Error("kc.yaml изменён при занятом lock")
+	}
+	if stateAfter, _ := os.ReadFile(statePath); !bytes.Equal(stateBefore, stateAfter) {
+		t.Error("состояние сохранено, хотя сборка не записана")
+	}
+	if _, err := os.Stat(lock); err != nil {
+		t.Errorf("чужой lock-файл удалён: %v", err)
+	}
+
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	if res := f.run(t); !res.Rebuilt {
+		t.Fatal("после снятия lock следующий запуск должен пересобрать")
+	}
+	if got := contextNames(f.load(t)); len(got) != 2 {
+		t.Errorf("контексты: %v", got)
+	}
+}
+
+func TestRunRemovesKubectlLock(t *testing.T) {
+	f := newFixture(t)
+	f.source(t, "dev.yaml", "dev", "https://dev")
+	f.run(t)
+	if _, err := os.Stat(f.output + ".lock"); !os.IsNotExist(err) {
+		t.Errorf("после Run lock-файл должен быть удалён, stat: %v", err)
 	}
 }
