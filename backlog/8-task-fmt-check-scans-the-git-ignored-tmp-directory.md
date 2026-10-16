@@ -1,7 +1,7 @@
 ---
 github_issue: 8
 url: https://github.com/Naymi/kubeconfig-composer/issues/8
-status: null
+status: Todo
 priority: P3
 blocked_by: []
 milestone: null
