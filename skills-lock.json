@@ -1,6 +1,42 @@
 {
   "version": 1,
   "skills": {
+    "gh-project-audit": {
+      "source": "naymi/skills",
+      "sourceType": "github",
+      "skillPath": "skills/gh-project-audit/SKILL.md",
+      "computedHash": "e8381a88f39f79d3bc801c96071357dea40176f92c20a4e395682e90db435f6a"
+    },
+    "gh-project-capture": {
+      "source": "naymi/skills",
+      "sourceType": "github",
+      "skillPath": "skills/gh-project-capture/SKILL.md",
+      "computedHash": "02eb42c944a1f6ef4123ba960263d11491c5a48190870f28463ecc9001ab73a5"
+    },
+    "gh-project-conventions": {
+      "source": "naymi/skills",
+      "sourceType": "github",
+      "skillPath": "skills/gh-project-conventions/SKILL.md",
+      "computedHash": "2647a392b30e4f3a38ae4335fe20b1e3f930d3ccde4c0fc99d37d51b69307567"
+    },
+    "gh-project-next": {
+      "source": "naymi/skills",
+      "sourceType": "github",
+      "skillPath": "skills/gh-project-next/SKILL.md",
+      "computedHash": "1e138ab12f250ecaebcea188c8f8362972f55f956feb80a903bfd1365c8392d3"
+    },
+    "gh-project-setup": {
+      "source": "naymi/skills",
+      "sourceType": "github",
+      "skillPath": "skills/gh-project-setup/SKILL.md",
+      "computedHash": "299aabf034f84657a3fbc859fbf5b64ddfec3f692551f09a00e5e11f686e0f6f"
+    },
+    "gh-project-sync": {
+      "source": "naymi/skills",
+      "sourceType": "github",
+      "skillPath": "skills/gh-project-sync/SKILL.md",
+      "computedHash": "2ff4867b70e19ad191fb91dbe3473564e6e027e1bc448089b69a18a2a7ba1771"
+    },
     "persisting-review-artifacts": {
       "source": "naymi/skills",
       "sourceType": "github",

@@ -1,0 +1,10 @@
+{
+  "owner": "Naymi",
+  "repo": "kubeconfig-composer",
+  "projectNumber": 14,
+  "projectId": "PVT_kwHOAUWuyM4BnVXl",
+  "priorityFieldId": "PVTSSF_lAHOAUWuyM4BnVXlzhl6eeE",
+  "priorityOptionIds": { "P0": "35003b77", "P1": "c4887738", "P2": "aa14f2a9", "P3": "1c9bd25b" },
+  "statusFieldId": "PVTSSF_lAHOAUWuyM4BnVXlzhl6edM",
+  "statusOptionIds": { "Todo": "f75ad846", "In Progress": "47fc9ee4", "Done": "98236657" }
+}
