@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "skills": {
+    "persisting-review-artifacts": {
+      "source": "naymi/skills",
+      "sourceType": "github",
+      "skillPath": "skills/persisting-review-artifacts/SKILL.md",
+      "computedHash": "c47fb434f661a2ba09cf2a7c17ac78f412d5bbb64fb407efd586b061ef4465a9"
+    },
+    "running-review-fix-rounds": {
+      "source": "naymi/skills",
+      "sourceType": "github",
+      "skillPath": "skills/running-review-fix-rounds/SKILL.md",
+      "computedHash": "670a05f8f2c62955580213f15714f14e36e674e09072285fd795b37e44115a41"
+    },
+    "thermo-nuclear-code-quality-review": {
+      "source": "naymi/skills",
+      "sourceType": "github",
+      "skillPath": "skills/thermo-nuclear-code-quality-review/SKILL.md",
+      "computedHash": "e6912079033c1939554df5d46ce32069652b1a46110212e8627ede47f4f10ca8"
+    },
+    "thermo-nuclear-code-quality-review-upstream": {
+      "source": "naymi/skills",
+      "sourceType": "github",
+      "skillPath": "skills/thermo-nuclear-code-quality-review-upstream/SKILL.md",
+      "computedHash": "219a96109581d9876170f27b7449201f508753b5f484c767406eed936546d9b5"
+    },
+    "thermo-nuclear-review": {
+      "source": "naymi/skills",
+      "sourceType": "github",
+      "skillPath": "skills/thermo-nuclear-review/SKILL.md",
+      "computedHash": "c176ff56c157d6db2071e4cda8469ec9e188accb092184ef56d6292ed6be0a2f"
+    },
+    "thermo-nuclear-review-upstream": {
+      "source": "naymi/skills",
+      "sourceType": "github",
+      "skillPath": "skills/thermo-nuclear-review-upstream/SKILL.md",
+      "computedHash": "dfcd5c4c8c54e5405e1fd14530a16b7d0c20492b3b86dec8cfc520e17c606d46"
+    }
+  }
+}

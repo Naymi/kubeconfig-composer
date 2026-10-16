@@ -4,6 +4,8 @@ version: '3'
 vars:
   BINARY: kubeconfig-composer
   PKG: github.com/naymi/kubeconfig-composer
+  GO_IMAGE: golang:1.24.1-bookworm
+  TEST_IMAGE: kubeconfig-composer-test:local
 
 tasks:
   default:
@@ -17,6 +19,7 @@ tasks:
     cmds:
       - task: setup:deps
       - task: setup:hooks
+      - task: setup:docker
 
   setup:deps:
     desc: Проверить версию Go и скачать зависимости модуля
@@ -38,6 +41,20 @@ tasks:
         printf '#!/bin/sh\n%s\nexec task check\n' "$marker" > "$hook"
         chmod +x "$hook"
         echo "pre-commit hook установлен: $hook"
+
+  setup:docker:
+    desc: Скачать образ для контейнерных тестов (пропускается без Docker, без запущенного daemon или без сети)
+    cmds:
+      - |
+        if ! command -v docker >/dev/null 2>&1; then
+          echo "docker не установлен, пропускаю (нужен для task test:docker и task test:container)"
+          exit 0
+        fi
+        if ! docker info >/dev/null 2>&1; then
+          echo "docker daemon недоступен, пропускаю (нужен для task test:docker и task test:container)"
+          exit 0
+        fi
+        docker pull {{.GO_IMAGE}} || echo "не удалось скачать {{.GO_IMAGE}}; task test:docker скачает его при первом запуске"
 
   build:
     desc: Собрать бинарник
@@ -79,6 +96,24 @@ tasks:
     desc: Тесты install.sh на локальном HTTP-сервере вместо GitHub (нужен python3)
     cmds:
       - sh scripts/install_test.sh
+
+  test:docker:
+    desc: 'go test в контейнере, исходники read-only, на хост ничего не пишется: task test:docker -- ./pkg/initstate/... -run Name -v'
+    cmds:
+      - >-
+        docker run --rm
+        -v "{{.ROOT_DIR}}":/src:ro
+        -v kubeconfig-composer-gomod:/go/pkg/mod
+        -w /src
+        -e GOCACHE=/tmp/gocache
+        -e GOFLAGS=-buildvcs=false
+        {{.GO_IMAGE}} go test {{.CLI_ARGS}}
+
+  test:container:
+    desc: Полный прогон в контейнере - gofmt, vet (linux и windows), unit-тесты, затем e2e init в bash и zsh
+    cmds:
+      - docker build --progress=plain -f scripts/Dockerfile.test --build-arg GO_IMAGE={{.GO_IMAGE}} -t {{.TEST_IMAGE}} .
+      - docker run --rm {{.TEST_IMAGE}}
 
   cover:
     desc: Тесты с отчётом о покрытии (coverage.out + HTML)

@@ -11,7 +11,7 @@ Kubeconfig Composer is a CLI tool for merging multiple Kubernetes configuration 
 `Taskfile.yml` ([go-task](https://taskfile.dev)) is the single entry point for build, test and lint:
 
 ```bash
-task setup        # fresh checkout: go mod download + pre-commit hook (runs `task check`); idempotent
+task setup        # fresh checkout: go mod download + pre-commit hook (runs `task check`) + docker pull of the test image (skipped without docker, daemon or network); idempotent
 task build        # go build -o kubeconfig-composer .
 task run -- merge # go run . merge
 task test         # go test ./...
@@ -21,6 +21,8 @@ task lint:sh      # shellcheck for install.sh and scripts/ (skipped if shellchec
 task check        # fmt:check + vet + test + lint:sh + test:install; run before committing
 task install      # go install .
 task --list       # all tasks
+task test:docker -- ./pkg/initstate/... -v   # go test in a container, sources read-only, nothing is written to the host
+task test:container                          # gofmt+vet (linux, windows)+unit+e2e init in bash and zsh
 ```
 
 ## Architecture
@@ -32,7 +34,8 @@ task --list       # all tasks
 All commands are in `cmd/` directory:
 - `root.go` - Root command definition and Execute() function
 - `merge.go` - Merges multiple kubeconfig files with conflict resolution. Defaults output to `~/.kube/config`; backs up an existing output file before overwriting; `--cleanup` moves source files to trash after a successful merge. Every merged cluster/user/context is named `<prefix>:<name>:<path-from---dir>` (prefix defaults to `kc`, `--prefix` configurable); a name that's a common placeholder (`local`, `user`, `default`, `kubernetes-admin`, etc. — see `isGenericName`) is replaced with the source filename instead of kept. **Idempotent:** an existing output file is loaded first as the merge base (its names win and are preserved) and excluded from the directory scan, the merged result is content-deduped (`Composer.Dedupe`) before writing, and `Composer.OutputUnchanged`/`ContextDiff` skip the write+prompt entirely (exit 0) when nothing actually changed
-- `list.go` - Lists all kubeconfig files found in a directory
+- `init.go` - Для `.bashrc`/`.zshrc` (`eval "$(kubeconfig-composer init)"`): собирает `~/.kubeconfig-composer/kc.yaml` (по умолчанию вне `--dir`, чтобы `merge` не взял его как источник; каталог состояния задаёт `initStateDir()`) из источников, только если изменился отпечаток (путь+mtime+размер); печатает в stdout одну строку `export KUBECONFIG=...` (всё остальное в stderr — stdout уходит в `eval`). Логика в `pkg/initstate`
+- `list.go` - Lists all kubeconfig files found in a directory (walks via `scanner.WalkKubeconfigFiles`, unreadable subdirs are reported to stderr and skipped)
 - `status.go` - Checks connectivity to clusters and displays status table
 - `cleanup.go` - Removes unreachable contexts and optionally deletes empty files
 - `revert.go` - Restores an output file (default `~/.kube/config`) from the most recent backup that differs from the current file; `--list` shows available backups
@@ -43,7 +46,7 @@ All commands are in `cmd/` directory:
 #### `pkg/composer`
 Main merging logic:
 - `Composer` struct manages the merge state with conflict tracking maps
-- `ScanDirectory()` - Recursively finds kubeconfig files
+- `ScanDirectory()` - Recursively finds kubeconfig files via `scanner.WalkKubeconfigFiles`; unreadable files/subdirs inside are skipped with a `⚠ пропускаю` warning
 - `LoadFiles()` - Loads specific kubeconfig files
 - `Merge()` - Merges all loaded configs with conflict resolution
 - `effectiveName()` - Builds every entity's `<prefix>:<name>:<path>` name (naming.go has `isGenericName`/placeholder detection); a name already starting with `<prefix>:` is left untouched (structural "already finalized" marker — required for idempotency since the current run's own path differs from the source path baked into a reloaded name)
@@ -52,7 +55,9 @@ Main merging logic:
 #### `pkg/scanner`
 File scanning utilities:
 - `IsKubeconfigFile()` - Identifies valid kubeconfig files by extension (.yaml, .yml), name (config, kubeconfig*), or content structure
-- `FindKubeconfigFiles()` - Scans directory and returns list of valid kubeconfig files
+- `WalkKubeconfigFiles(dir, onSkip, visit)` - the only walk over a source directory (used by `FindKubeconfigFiles`, `Composer.ScanDirectory`, `list`): skips `IsSkippedDir` subdirs, calls `visit` only for `IsKubeconfigFile`; an unreadable root is an error, an unreadable entry inside goes to `onSkip` and is skipped
+- `IsSkippedDir()` / `IsServiceFile()` - `cache/`, `http-cache/`, `kubens/`, hidden dirs; files `kubectx` and `*.lock`
+- `FindKubeconfigFiles()` - Scans directory and returns list of valid (loadable) kubeconfig files
 
 #### `pkg/checker`
 Cluster connectivity checking:
@@ -65,6 +70,16 @@ Kubeconfig cleanup utilities:
 - `RemoveContextsFromFile()` - Removes specified contexts and unused clusters/users
 - `WriteConfig()` - Safely writes kubeconfig to file with proper permissions
 - `Dedupe()` (`dedupe.go`) - Collapses content-identical entries. Clusters/users are grouped by content via `reflect.DeepEqual` (with `LocationOfOrigin` cleared, since it only records the source file); contexts are grouped by their `(Cluster, AuthInfo)` target, **ignoring namespace** — namespace-only variants collapse and the non-empty namespace is kept. Canonical name is the shortest (ties broken alphabetically), except names referenced by `current-context` always win so the active context never breaks. Returns a `DedupeReport` of what merged.
+
+#### `pkg/initstate`
+Логика `init`:
+- `Run()` (`run.go`) - `resolvePaths` (разворачивает ссылки в `--dir` и в каталоге `--output`; в `export` идёт `--output` как задан) → отпечаток → порог `--max-size` → блокировка init для пары → пересборка: compose без lock'ов, затем под `<output>.lock` (протокол client-go, `clientlock.go`) до 3 попыток: stat → чтение сессии (нечитаемый файл — в бэкап; пустой — ждём, это середина записи kubectx) → `current-context` → `Dedupe` → namespace → бэкап → stat; если файл изменился (kubectx/kubens lock не берут), попытка повторяется с копии собранного конфига; затем rename. Не печатает в stdout; `Result.ExportOK` истинно, если `kc.yaml` существует (даже при ошибке)
+- `Scan()` (`fingerprint.go`) - обход через `stat` без чтения файлов; пропускает `scanner.IsSkippedDir`, скрытые файлы, `scanner.IsServiceFile` и сам output, нечитаемое внутри пропускает. Это отдельный обход, не `WalkKubeconfigFiles`: он смотрит все файлы и не читает содержимое
+- `State` (`state.go`) - своё у каждой пары (`--dir`, `--output`): `init-state-<key>.json`, `<key>` = `pairKey` (12 hex sha256 развёрнутых путей); кроме отпечатка хранит `Names` (что init записал) и `SourceNamespaces`
+- `ReadSession()`/`Session` (`carry.go`) - `current-context` и `namespace` прежнего `kc.yaml` переносятся на пересобранный; `LostForeign()` находит пропавшие записи, которых нет в `State.Names` прошлой сборки (префикс не важен; без состояния — все пропавшие), → предупреждение + бэкап; `ApplyNamespaces()` переносит прежний namespace, только если пользователь менял его в kc.yaml (сверяет с `State.SourceNamespaces`), иначе побеждает источник
+- `TryLock()`/`WaitLock()` (`lock*.go`) - `flock` на `init-<key>.lock`; на windows пустышка
+- `lockKubeconfig()` (`clientlock.go`) - `<output>.lock` через `O_EXCL`, как client-go (создаёт недостающий каталог); чужой lock-файл не удаляется; «занят» — только `errKubeconfigLockBusy` по таймауту
+- `CaptureStdout()` (`quiet.go`) - перехватывает вывод Composer (fmt и pterm); меняет глобальный `os.Stdout`, не потокобезопасна
 
 ### Conflict Resolution Strategy
 When merging configs, the tool:
@@ -84,6 +99,8 @@ When merging configs, the tool:
 The tool keeps its own working state outside the kube directory:
 - `backups/` - `merge` copies the pre-existing output file here as `<name>.backup.<timestamp>` before overwriting. `revert` reads from here.
 - `trash/` - `merge --cleanup` moves merged source files here as `<timestamp>.<name>` (uses `os.Rename`, never deletes outright), skipping the output file itself.
+- `kc.yaml` - default output of `init` (kept here, outside `~/.kube`, so `merge` never picks it up as a source and `merge --cleanup` never trashes it).
+- `init-state-<key>.json` (fingerprint, names, source namespaces), `init-<key>.lock` - state of `init`, one pair per (`--dir`, `--output`); `backups/` also receives `kc.yaml.backup.<timestamp>` from `init` (one per version of the previous `kc.yaml`, from the same bytes the session was read from; an existing backup is never overwritten — a taken name gets `-2`, `-3`, …). While writing, `init` also briefly creates `<output>.lock` next to the output (client-go protocol).
 
 ### Cluster Deduplication Cache
 `status` and `cleanup` dedupe clusters before hitting the network: a cluster is keyed by `(server, CertificateAuthorityData)`, and the result is cached so identical clusters referenced by multiple contexts/files are only checked once. The cache is shared across goroutines and guarded by a 1-slot channel used as a mutex (`clusterCacheMutex <- struct{}{}` / `<-clusterCacheMutex`). This pattern appears inline in both `cmd/status.go` and `cmd/cleanup.go`.
@@ -98,6 +115,8 @@ Uses `k8s.io/client-go` for:
 ## Testing
 
 Tests are located in `pkg/composer/composer_test.go` and `pkg/cleaner/dedupe_test.go`. When adding features, add corresponding test cases in the appropriate package test file.
+
+Tests of `init` and its e2e run in a container; tests never use `HOME` (`StateDir` is passed explicitly); e2e tests live in `e2e/` under the `e2e` build tag.
 
 ## Common Development Patterns
 
@@ -136,6 +155,7 @@ Key dependencies:
 - The tool protects `~/.kube/config` from deletion (only cleans contexts, never deletes the file)
 - Interactive prompts are used for conflict resolution during merge
 - Timeout defaults to 3 seconds for cluster connectivity checks
+- `scanner.WalkKubeconfigFiles` is the only walk over a source directory (`ScanDirectory`, `FindKubeconfigFiles`, `list`); don't add another `filepath.Walk` copy. It skips `cache/`, `http-cache/`, `kubens/` and hidden directories (the walk root is not checked), files `kubectx` and `*.lock` (via `IsKubeconfigFile`), and unreadable entries below the root. `ScanDirectory` sorts found files by path.
 - **Rebuild before testing manually:** `task build` — the maintainer runs the compiled binary directly, not `go run .`; an unrebuilt binary after source changes looks identical to a real bug
 - **`reflect.DeepEqual` gotcha:** after `clientcmd.Write`+`LoadFromFile`, `Extensions` becomes an empty non-nil map instead of `nil` — normalize (treat `len == 0` as equal) before any `reflect.DeepEqual` comparison of loaded-vs-in-memory kubeconfig objects
 - **Testing `merge`'s interactive prompts non-interactively:** pipe `< /dev/null` (to hit the EOF/error path) or run in background with `sleep`+`kill` after the prompt appears — don't let it block
