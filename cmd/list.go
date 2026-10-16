@@ -34,19 +34,9 @@ func init() {
 func runList(cmd *cobra.Command, args []string) error {
 	var files []string
 
-	err := filepath.Walk(listDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if info.IsDir() {
-			return nil
-		}
-
-		if !scanner.IsKubeconfigFile(path, info) {
-			return nil
-		}
-
+	err := scanner.WalkKubeconfigFiles(listDir, func(path string, err error) {
+		fmt.Fprintf(os.Stderr, "⚠ пропускаю %s: %v\n", path, err)
+	}, func(path string) error {
 		files = append(files, path)
 		return nil
 	})

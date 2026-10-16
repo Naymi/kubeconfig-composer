@@ -214,24 +214,14 @@ func (c *Composer) ScanDirectory(dir string, exclude ...string) error {
 
 	var kubeconfigPaths []string
 
-	// Сначала собираем все пути к файлам
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if info.IsDir() {
-			return nil
-		}
-
-		if !scanner.IsKubeconfigFile(path, info) {
-			return nil
-		}
-
+	// Сначала собираем все пути к файлам; недоступное внутри dir пропускаем
+	// с предупреждением (см. scanner.WalkKubeconfigFiles).
+	err := scanner.WalkKubeconfigFiles(dir, func(path string, err error) {
+		pterm.FgYellow.Printf("⚠ пропускаю %s: %v\n", path, err)
+	}, func(path string) error {
 		if abs, err := filepath.Abs(path); err == nil && excludeSet[abs] {
 			return nil
 		}
-
 		kubeconfigPaths = append(kubeconfigPaths, path)
 		return nil
 	})
@@ -253,6 +243,7 @@ func (c *Composer) ScanDirectory(dir string, exclude ...string) error {
 
 	resultChan := make(chan loadResult, len(kubeconfigPaths))
 
+	start := len(c.configs)
 	for _, path := range kubeconfigPaths {
 		go func(p string) {
 			config, err := clientcmd.LoadFromFile(p)
@@ -284,6 +275,13 @@ func (c *Composer) ScanDirectory(dir string, exclude ...string) error {
 		c.configs = append(c.configs, result.config)
 	}
 	close(resultChan)
+
+	// Горутины завершаются в произвольном порядке; сортируем добавленные этим
+	// сканированием конфиги по пути, чтобы результат merge (в том числе
+	// current-context «первого файла») не зависел от планировщика. Ранее
+	// загруженная база (start) остаётся первой.
+	added := c.configs[start:]
+	sort.Slice(added, func(i, j int) bool { return added[i].fullPath < added[j].fullPath })
 
 	return nil
 }
@@ -535,6 +533,23 @@ func (c *Composer) WriteOutput(path string) error {
 	}
 
 	return nil
+}
+
+// Result возвращает итоговый конфиг после Merge (и Dedupe). Возвращается тот же
+// указатель, что хранит Composer: правки вызывающего видны в OutputUnchanged и
+// WriteOutputAtomic. После Dedupe указатель меняется — вызывать Result заново.
+func (c *Composer) Result() *clientcmdapi.Config {
+	return c.mergedConfig
+}
+
+// WriteOutputAtomic — как WriteOutput, но через временный файл и rename
+// (см. cleaner.WriteFileAtomic).
+func (c *Composer) WriteOutputAtomic(path string) error {
+	data, err := clientcmd.Write(*c.mergedConfig)
+	if err != nil {
+		return fmt.Errorf("failed to serialize config: %w", err)
+	}
+	return cleaner.WriteFileAtomic(path, data, 0o600)
 }
 
 // OutputUnchanged сообщает, совпадает ли результат текущего merge с уже

@@ -1,0 +1,22 @@
+ARG GO_IMAGE=golang:1.24.1-bookworm
+FROM ${GO_IMAGE}
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends zsh procps \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+
+# Сборочные проверки: форматирование, vet под linux и windows, unit-тесты.
+RUN test -z "$(gofmt -l .)" \
+    && go vet ./... \
+    && GOOS=windows GOARCH=amd64 go vet ./... \
+    && go test ./...
+
+RUN go build -o /usr/local/bin/kubeconfig-composer .
+
+ENV KC_BIN=/usr/local/bin/kubeconfig-composer
+CMD ["sh", "-c", "go test -tags e2e -count=1 -v ./e2e/... && sh scripts/init_shell_test.sh"]
