@@ -1,4 +1,8 @@
 #!/bin/sh
+# Строки для заглушки бинарника и для sh -c в одинарных кавычках намеренно:
+# их раскрывает вложенная оболочка.
+# shellcheck disable=SC2016
+#
 # Тесты install.sh без сети: GitHub подменяется локальным HTTP-сервером
 # (KC_API_URL / KC_DOWNLOAD_URL). Запуск: task test:install
 set -eu
@@ -62,6 +66,8 @@ new_case() {
 	stop_server
 	DOCROOT="$WORK/$CASE/docroot"
 	INSTALL_DIR="$WORK/$CASE/bin"
+	CASE_HOME="$WORK/$CASE/home"
+	mkdir -p "$CASE_HOME"
 	mkdir -p "$DOCROOT/api/releases" "$DOCROOT/dl"
 }
 
@@ -72,7 +78,8 @@ make_release() {
 	name="kubeconfig-composer_${version}_$(host_os)_$(host_arch).tar.gz"
 	stage="$WORK/$CASE/stage-$version"
 	mkdir -p "$stage" "$DOCROOT/dl/$tag"
-	printf '#!/bin/sh\necho "kubeconfig-composer version %s"\n' "$version" >"$stage/kubeconfig-composer"
+	# Заглушка: --version печатает версию, init — строку export, как настоящий бинарник.
+	printf '#!/bin/sh\nif [ "${1:-}" = init ]; then echo "export KUBECONFIG=\x27/fake/kc.yaml\x27"; exit 0; fi\necho "kubeconfig-composer version %s"\n' "$version" >"$stage/kubeconfig-composer"
 	chmod +x "$stage/kubeconfig-composer"
 	tar -czf "$DOCROOT/dl/$tag/$name" -C "$stage" kubeconfig-composer
 	sum="$(sha256_of "$DOCROOT/dl/$tag/$name")"
@@ -126,6 +133,9 @@ run_install() {
 		KC_API_URL="http://127.0.0.1:$PORT/api" \
 		KC_DOWNLOAD_URL="http://127.0.0.1:$PORT/dl" \
 		KC_INSTALL_DIR="$INSTALL_DIR" \
+		HOME="$CASE_HOME" \
+		SHELL=/bin/sh \
+		ZDOTDIR= \
 		"$@" \
 		sh "$INSTALL_SH" >"$OUT" 2>&1 || RC=$?
 }
@@ -149,6 +159,11 @@ assert_installed() {
 
 assert_not_installed() {
 	[ ! -e "$INSTALL_DIR/kubeconfig-composer" ] || fail "бинарник не должен быть установлен"
+}
+
+# count_blocks <файл>: сколько блоков kubeconfig-composer в rc-файле
+count_blocks() {
+	grep -c '^# >>> kubeconfig-composer >>>$' "$1" 2>/dev/null || true
 }
 
 # --- кейсы ---
@@ -282,6 +297,138 @@ start_server
 run_install KC_INSTALL_DIR="$INSTALL_DIR/nested/bin"
 assert_rc 0
 [ -x "$INSTALL_DIR/nested/bin/kubeconfig-composer" ] || fail "бинарник не создан во вложенном каталоге"
+pass
+
+new_case shell-init-off-by-default
+make_release v1.0.0
+set_latest v1.0.0
+start_server
+run_install SHELL=/bin/zsh
+assert_rc 0
+[ ! -e "$CASE_HOME/.zshrc" ] || fail "без KC_SHELL_INIT rc-файл трогать нельзя"
+assert_out_contains "KC_SHELL_INIT=1"
+pass
+
+new_case shell-init-zsh
+make_release v1.0.0
+set_latest v1.0.0
+start_server
+printf 'alias ll="ls -l"\n' >"$CASE_HOME/.zshrc"
+run_install SHELL=/bin/zsh KC_SHELL_INIT=1
+assert_rc 0
+rc="$CASE_HOME/.zshrc"
+grep -qF 'alias ll="ls -l"' "$rc" || fail "прежнее содержимое .zshrc потеряно"
+[ "$(count_blocks "$rc")" = 1 ] || fail "ожидался один блок: $(cat "$rc")"
+grep -qF "$INSTALL_DIR/kubeconfig-composer' init" "$rc" || fail "в блоке нет вызова init по абсолютному пути: $(cat "$rc")"
+assert_out_contains "$rc"
+pass
+
+new_case shell-init-zdotdir
+make_release v1.0.0
+set_latest v1.0.0
+start_server
+mkdir -p "$CASE_HOME/zdot"
+run_install SHELL=/usr/bin/zsh ZDOTDIR="$CASE_HOME/zdot" KC_SHELL_INIT=1
+assert_rc 0
+[ "$(count_blocks "$CASE_HOME/zdot/.zshrc")" = 1 ] || fail "zsh с ZDOTDIR: блок должен быть в \$ZDOTDIR/.zshrc"
+[ ! -e "$CASE_HOME/.zshrc" ] || fail "при ZDOTDIR ~/.zshrc трогать нельзя"
+pass
+
+new_case shell-init-bash-works
+make_release v1.0.0
+set_latest v1.0.0
+start_server
+run_install SHELL=/bin/bash KC_SHELL_INIT=1
+assert_rc 0
+rc="$CASE_HOME/.bashrc"
+[ "$(count_blocks "$rc")" = 1 ] || fail "нет блока в .bashrc"
+got="$(env -i HOME="$CASE_HOME" PATH=/usr/bin:/bin sh -c '. "$1"; echo "$KUBECONFIG|$PATH"' _ "$rc" 2>&1)" || true
+case "$got" in
+"/fake/kc.yaml|$INSTALL_DIR:"*) ;;
+*) fail "после source .bashrc ожидались KUBECONFIG и PATH, получено: $got" ;;
+esac
+pass
+
+new_case shell-init-idempotent
+make_release v1.0.0
+make_release v1.1.0
+set_latest v1.0.0
+start_server
+run_install SHELL=/bin/zsh KC_SHELL_INIT=1
+printf 'echo tail\n' >>"$CASE_HOME/.zshrc"
+set_latest v1.1.0
+run_install SHELL=/bin/zsh KC_SHELL_INIT=1
+assert_rc 0
+run_install SHELL=/bin/zsh KC_SHELL_INIT=1
+assert_rc 0
+assert_out_contains "уже актуальна"
+rc="$CASE_HOME/.zshrc"
+[ "$(count_blocks "$rc")" = 1 ] || fail "повторная установка добавила второй блок: $(cat "$rc")"
+grep -qF 'echo tail' "$rc" || fail "строка после блока потеряна"
+pass
+
+new_case shell-init-updates-block
+make_release v1.0.0
+set_latest v1.0.0
+start_server
+run_install SHELL=/bin/zsh KC_SHELL_INIT=1
+old_dir="$INSTALL_DIR"
+INSTALL_DIR="$WORK/$CASE/other bin"
+run_install SHELL=/bin/zsh KC_SHELL_INIT=1
+assert_rc 0
+rc="$CASE_HOME/.zshrc"
+[ "$(count_blocks "$rc")" = 1 ] || fail "блок должен замениться, а не дописаться"
+grep -qF "$INSTALL_DIR/kubeconfig-composer' init" "$rc" || fail "блок не указывает на новый каталог: $(cat "$rc")"
+grep -qF "$old_dir/kubeconfig-composer'" "$rc" && fail "в блоке остался старый каталог"
+got="$(env -i HOME="$CASE_HOME" PATH=/usr/bin:/bin sh -c '. "$1"; echo "$KUBECONFIG"' _ "$rc" 2>&1)" || true
+[ "$got" = /fake/kc.yaml ] || fail "путь с пробелом сломал блок: $got"
+pass
+
+new_case shell-init-symlinked-rc
+make_release v1.0.0
+set_latest v1.0.0
+start_server
+mkdir -p "$CASE_HOME/dotfiles"
+printf '# dotfiles\n' >"$CASE_HOME/dotfiles/zshrc"
+ln -s "$CASE_HOME/dotfiles/zshrc" "$CASE_HOME/.zshrc"
+run_install SHELL=/bin/zsh KC_SHELL_INIT=1
+assert_rc 0
+[ -L "$CASE_HOME/.zshrc" ] || fail "символическая ссылка .zshrc заменена обычным файлом"
+[ "$(count_blocks "$CASE_HOME/dotfiles/zshrc")" = 1 ] || fail "блок не попал в цель ссылки"
+pass
+
+new_case shell-init-explicit-rc
+make_release v1.0.0
+set_latest v1.0.0
+start_server
+run_install SHELL=/bin/fish KC_SHELL_INIT=1 KC_SHELL_RC="$CASE_HOME/custom.sh"
+assert_rc 0
+[ "$(count_blocks "$CASE_HOME/custom.sh")" = 1 ] || fail "KC_SHELL_RC не учтён"
+pass
+
+new_case shell-init-unknown-shell
+make_release v1.0.0
+set_latest v1.0.0
+start_server
+run_install SHELL=/usr/bin/fish KC_SHELL_INIT=1
+assert_rc 0
+assert_installed 1.0.0
+assert_out_contains "KC_SHELL_RC"
+assert_out_contains "не входит в PATH"
+pass
+
+new_case shell-init-quote-in-path
+make_release v1.0.0
+set_latest v1.0.0
+start_server
+INSTALL_DIR="$WORK/$CASE/it's bin"
+run_install SHELL=/bin/bash KC_SHELL_INIT=1
+assert_rc 0
+got="$(env -i HOME="$CASE_HOME" PATH=/usr/bin:/bin sh -c '. "$1"; echo "$KUBECONFIG|$PATH"' _ "$CASE_HOME/.bashrc" 2>&1)" || true
+case "$got" in
+"/fake/kc.yaml|$INSTALL_DIR:"*) ;;
+*) fail "кавычка в пути сломала блок: $got" ;;
+esac
 pass
 
 stop_server
