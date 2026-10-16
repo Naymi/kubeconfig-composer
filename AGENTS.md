@@ -21,6 +21,8 @@ task lint:sh      # shellcheck for install.sh and scripts/ (skipped if shellchec
 task check        # fmt:check + vet + test + lint:sh + test:install; run before committing
 task install      # go install .
 task --list       # all tasks
+task test:docker -- ./pkg/initstate/... -v   # go test in a container, sources read-only, nothing is written to the host
+task test:container                          # gofmt+vet (linux, windows)+unit+e2e init in bash and zsh
 ```
 
 ## Architecture
@@ -32,6 +34,7 @@ task --list       # all tasks
 All commands are in `cmd/` directory:
 - `root.go` - Root command definition and Execute() function
 - `merge.go` - Merges multiple kubeconfig files with conflict resolution. Defaults output to `~/.kube/config`; backs up an existing output file before overwriting; `--cleanup` moves source files to trash after a successful merge. Every merged cluster/user/context is named `<prefix>:<name>:<path-from---dir>` (prefix defaults to `kc`, `--prefix` configurable); a name that's a common placeholder (`local`, `user`, `default`, `kubernetes-admin`, etc. — see `isGenericName`) is replaced with the source filename instead of kept. **Idempotent:** an existing output file is loaded first as the merge base (its names win and are preserved) and excluded from the directory scan, the merged result is content-deduped (`Composer.Dedupe`) before writing, and `Composer.OutputUnchanged`/`ContextDiff` skip the write+prompt entirely (exit 0) when nothing actually changed
+- `init.go` - Для `.bashrc`/`.zshrc` (`eval "$(kubeconfig-composer init)"`): собирает `~/.kube/kc.yaml` из источников, только если изменился отпечаток (путь+mtime+размер); печатает в stdout одну строку `export KUBECONFIG=...` (всё остальное в stderr — stdout уходит в `eval`). Логика в `pkg/initstate`
 - `list.go` - Lists all kubeconfig files found in a directory
 - `status.go` - Checks connectivity to clusters and displays status table
 - `cleanup.go` - Removes unreachable contexts and optionally deletes empty files
@@ -66,6 +69,14 @@ Kubeconfig cleanup utilities:
 - `WriteConfig()` - Safely writes kubeconfig to file with proper permissions
 - `Dedupe()` (`dedupe.go`) - Collapses content-identical entries. Clusters/users are grouped by content via `reflect.DeepEqual` (with `LocationOfOrigin` cleared, since it only records the source file); contexts are grouped by their `(Cluster, AuthInfo)` target, **ignoring namespace** — namespace-only variants collapse and the non-empty namespace is kept. Canonical name is the shortest (ties broken alphabetically), except names referenced by `current-context` always win so the active context never breaks. Returns a `DedupeReport` of what merged.
 
+#### `pkg/initstate`
+Логика `init`:
+- `Run()` (`run.go`) - отпечаток → порог `--max-size` → блокировка → пересборка. Не печатает в stdout; `Result.ExportOK` истинно, если `kc.yaml` существует (даже при ошибке)
+- `Scan()` (`fingerprint.go`) - обход через `stat` без чтения файлов; пропускает `scanner.IsSkippedDir`, скрытые файлы и сам output
+- `ReadSession()`/`Session` (`carry.go`) - `current-context` и `namespace` прежнего `kc.yaml` переносятся на пересобранный; `LostForeign()` находит пропавшие записи без префикса (предупреждение + бэкап)
+- `TryLock()`/`WaitLock()` (`lock*.go`) - `flock`; на windows пустышка
+- `CaptureStdout()` (`quiet.go`) - перехватывает вывод Composer (fmt и pterm); меняет глобальный `os.Stdout`, не потокобезопасна
+
 ### Conflict Resolution Strategy
 When merging configs, the tool:
 1. Processes clusters and users first, creating name mappings
@@ -84,6 +95,7 @@ When merging configs, the tool:
 The tool keeps its own working state outside the kube directory:
 - `backups/` - `merge` copies the pre-existing output file here as `<name>.backup.<timestamp>` before overwriting. `revert` reads from here.
 - `trash/` - `merge --cleanup` moves merged source files here as `<timestamp>.<name>` (uses `os.Rename`, never deletes outright), skipping the output file itself.
+- `init-state.json` (fingerprint), `init.lock` - state of `init`; `backups/` also receives `kc.yaml.backup.<timestamp>` from `init`.
 
 ### Cluster Deduplication Cache
 `status` and `cleanup` dedupe clusters before hitting the network: a cluster is keyed by `(server, CertificateAuthorityData)`, and the result is cached so identical clusters referenced by multiple contexts/files are only checked once. The cache is shared across goroutines and guarded by a 1-slot channel used as a mutex (`clusterCacheMutex <- struct{}{}` / `<-clusterCacheMutex`). This pattern appears inline in both `cmd/status.go` and `cmd/cleanup.go`.
@@ -98,6 +110,8 @@ Uses `k8s.io/client-go` for:
 ## Testing
 
 Tests are located in `pkg/composer/composer_test.go` and `pkg/cleaner/dedupe_test.go`. When adding features, add corresponding test cases in the appropriate package test file.
+
+Tests of `init` and its e2e run in a container; tests never use `HOME` (`StateDir` is passed explicitly); e2e tests live in `e2e/` under the `e2e` build tag.
 
 ## Common Development Patterns
 
@@ -136,6 +150,7 @@ Key dependencies:
 - The tool protects `~/.kube/config` from deletion (only cleans contexts, never deletes the file)
 - Interactive prompts are used for conflict resolution during merge
 - Timeout defaults to 3 seconds for cluster connectivity checks
+- `ScanDirectory` and `list` skip `cache/`, `http-cache/` and hidden directories (the walk root is not checked) and sort found files by path.
 - **Rebuild before testing manually:** `task build` — the maintainer runs the compiled binary directly, not `go run .`; an unrebuilt binary after source changes looks identical to a real bug
 - **`reflect.DeepEqual` gotcha:** after `clientcmd.Write`+`LoadFromFile`, `Extensions` becomes an empty non-nil map instead of `nil` — normalize (treat `len == 0` as equal) before any `reflect.DeepEqual` comparison of loaded-vs-in-memory kubeconfig objects
 - **Testing `merge`'s interactive prompts non-interactively:** pipe `< /dev/null` (to hit the EOF/error path) or run in background with `sleep`+`kill` after the prompt appears — don't let it block

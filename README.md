@@ -47,6 +47,7 @@ go build -o kubeconfig-composer
 | Команда | Что делает |
 |---|---|
 | `merge` | Объединяет kubeconfig файлы в один |
+| `init` | Собирает `~/.kube/kc.yaml` при старте shell и печатает `export KUBECONFIG` |
 | `list` | Показывает найденные kubeconfig файлы |
 | `status` | Проверяет доступность кластеров |
 | `cleanup` | Удаляет недоступные контексты |
@@ -79,6 +80,36 @@ kubeconfig-composer merge --cleanup
 # Свой префикс имён вместо `kc` (пустая строка отключает префикс)
 kubeconfig-composer merge --prefix src
 ```
+
+### init: сборка при старте shell
+
+Добавьте в `~/.bashrc` или `~/.zshrc`:
+
+```bash
+eval "$(kubeconfig-composer init)"
+```
+
+При каждом открытии терминала `init` сверяет отпечаток файлов в `~/.kube` (путь, mtime, размер) с прошлым. Ничего не изменилось: он за миллисекунды печатает `export KUBECONFIG=~/.kube/kc.yaml`. Что-то изменилось: пересобирает `kc.yaml` без вопросов. Исходные файлы не меняются и не перемещаются.
+
+```bash
+# Принудительно пересобрать
+kubeconfig-composer init --refresh
+
+# Порог размера источников в МБ (по умолчанию 5; 0 отключает)
+kubeconfig-composer init --max-size 10
+```
+
+Если источники изменились и весят больше порога, при старте shell пересборка пропускается: в stderr появляется предупреждение, `KUBECONFIG` указывает на прежний `kc.yaml`. Запустите `kubeconfig-composer init --refresh`. Полная сборка занимает около 0,1 с на мегабайт источников. Если `kc.yaml` ещё нет, порог не действует.
+
+`kc.yaml` — производный файл. `current-context` и `namespace` в нём (их меняют `kubectl config use-context`, `kubectx`, `kubens`) сохраняются при пересборке. Остальные правки `kc.yaml` пропадут: если при пересборке исчезают записи, которых нет в источниках, `init` пишет об этом в stderr и кладёт прежний файл в `~/.kubeconfig-composer/backups/` (восстановить: `kubeconfig-composer revert --output ~/.kube/kc.yaml`).
+
+Инструменты, которые добавляют кластеры, запускайте с отдельным файлом-источником, чтобы запись пережила пересборку:
+
+```bash
+alias eks-add='KUBECONFIG=~/.kube/aws.yaml aws eks update-kubeconfig'
+```
+
+Ограничение: подмена файла с тем же размером и mtime (например, `cp -p`) не замечается; в этом случае запустите `init --refresh`.
 
 ### list: просмотр найденных файлов
 
