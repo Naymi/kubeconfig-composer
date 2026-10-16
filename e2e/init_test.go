@@ -95,7 +95,7 @@ func TestInitIgnoresCacheDirAndStaysFast(t *testing.T) {
 	e := newEnv(t)
 	e.source(t, "dev.yaml", "dev", "https://dev")
 	e.source(t, "cache/http/leak.yaml", "leak", "https://leak")
-	for i := 0; i < 5000; i++ {
+	for i := 0; i < 10000; i++ {
 		p := filepath.Join(e.kube, "cache", "http", fmt.Sprintf("f%05d", i))
 		if err := os.WriteFile(p, []byte("junk"), 0o600); err != nil {
 			t.Fatal(err)
@@ -114,7 +114,7 @@ func TestInitIgnoresCacheDirAndStaysFast(t *testing.T) {
 		t.Fatalf("второй запуск: код %d", code)
 	}
 	if d := time.Since(start); d > time.Second {
-		t.Errorf("запуск без изменений занял %s при 5000 файлов в cache/", d)
+		t.Errorf("запуск без изменений занял %s при 10000 файлов в cache/", d)
 	}
 }
 
@@ -266,5 +266,73 @@ func TestInitFailureModes(t *testing.T) {
 	stdout, stderr, code = e.run("init")
 	if code != 0 || !strings.HasPrefix(stdout, "export KUBECONFIG=") || !strings.Contains(stderr, "bad.yaml") {
 		t.Errorf("битый источник: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+}
+
+func TestInitUnchangedRunDoesNotRewriteOutput(t *testing.T) {
+	e := newEnv(t)
+	e.source(t, "dev.yaml", "dev", "https://dev")
+	if _, _, code := e.run("init"); code != 0 {
+		t.Fatal("первый запуск")
+	}
+
+	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(e.output(), old, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, code := e.run("init"); code != 0 {
+		t.Fatal("повторный запуск")
+	}
+	fi, err := os.Stat(e.output())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fi.ModTime().Equal(old) {
+		t.Errorf("kc.yaml перезаписан без изменений источников: mtime=%s", fi.ModTime())
+	}
+}
+
+func TestInitReflectsSourceRemoval(t *testing.T) {
+	e := newEnv(t)
+	e.source(t, "a.yaml", "a", "https://a")
+	e.source(t, "b.yaml", "b", "https://b")
+	if _, _, code := e.run("init"); code != 0 {
+		t.Fatal("первый запуск")
+	}
+	if got := len(e.load(t).Contexts); got != 2 {
+		t.Fatalf("контекстов %d, ожидалось 2", got)
+	}
+
+	if err := os.Remove(filepath.Join(e.kube, "b.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, code := e.run("init"); code != 0 {
+		t.Fatal("запуск после удаления источника")
+	}
+	got := e.load(t)
+	if _, ok := got.Contexts["kc:b:b.yaml"]; ok {
+		t.Error("контекст удалённого источника остался в kc.yaml")
+	}
+	if _, ok := got.Contexts["kc:a:a.yaml"]; !ok || len(got.Contexts) != 1 {
+		t.Errorf("ожидался один контекст kc:a:a.yaml, получено %d", len(got.Contexts))
+	}
+}
+
+func TestInitBrokenSourceWithExistingOutputKeepsGoodContext(t *testing.T) {
+	e := newEnv(t)
+	e.source(t, "dev.yaml", "dev", "https://dev")
+	if _, _, code := e.run("init"); code != 0 {
+		t.Fatal("первый запуск")
+	}
+
+	if err := os.WriteFile(filepath.Join(e.kube, "bad.yaml"), []byte("apiVersion: [unclosed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, code := e.run("init")
+	if code != 0 || !strings.HasPrefix(stdout, "export KUBECONFIG=") || !strings.Contains(stderr, "bad.yaml") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if _, ok := e.load(t).Contexts["kc:dev:dev.yaml"]; !ok {
+		t.Error("хороший контекст пропал из kc.yaml")
 	}
 }
