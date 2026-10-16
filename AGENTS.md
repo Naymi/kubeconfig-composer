@@ -73,12 +73,12 @@ Kubeconfig cleanup utilities:
 
 #### `pkg/initstate`
 Логика `init`:
-- `Run()` (`run.go`) - `resolvePaths` (разворачивает ссылки в `--dir` и в каталоге `--output`; в `export` идёт `--output` как задан) → отпечаток → порог `--max-size` → блокировка init для пары → пересборка: compose без lock'ов, затем под `<output>.lock` (протокол client-go, `clientlock.go`) чтение сессии → `current-context` → `Dedupe` → namespace → бэкап → rename. Не печатает в stdout; `Result.ExportOK` истинно, если `kc.yaml` существует (даже при ошибке)
+- `Run()` (`run.go`) - `resolvePaths` (разворачивает ссылки в `--dir` и в каталоге `--output`; в `export` идёт `--output` как задан) → отпечаток → порог `--max-size` → блокировка init для пары → пересборка: compose без lock'ов, затем под `<output>.lock` (протокол client-go, `clientlock.go`) до 3 попыток: stat → чтение сессии (нечитаемый файл — в бэкап; пустой — ждём, это середина записи kubectx) → `current-context` → `Dedupe` → namespace → бэкап → stat; если файл изменился (kubectx/kubens lock не берут), попытка повторяется с копии собранного конфига; затем rename. Не печатает в stdout; `Result.ExportOK` истинно, если `kc.yaml` существует (даже при ошибке)
 - `Scan()` (`fingerprint.go`) - обход через `stat` без чтения файлов; пропускает `scanner.IsSkippedDir`, скрытые файлы, `scanner.IsServiceFile` и сам output, нечитаемое внутри пропускает. Это отдельный обход, не `WalkKubeconfigFiles`: он смотрит все файлы и не читает содержимое
 - `State` (`state.go`) - своё у каждой пары (`--dir`, `--output`): `init-state-<key>.json`, `<key>` = `pairKey` (12 hex sha256 развёрнутых путей); кроме отпечатка хранит `Names` (что init записал) и `SourceNamespaces`
 - `ReadSession()`/`Session` (`carry.go`) - `current-context` и `namespace` прежнего `kc.yaml` переносятся на пересобранный; `LostForeign()` находит пропавшие записи, которых нет в `State.Names` прошлой сборки (префикс не важен; без состояния — все пропавшие), → предупреждение + бэкап; `ApplyNamespaces()` переносит прежний namespace, только если пользователь менял его в kc.yaml (сверяет с `State.SourceNamespaces`), иначе побеждает источник
 - `TryLock()`/`WaitLock()` (`lock*.go`) - `flock` на `init-<key>.lock`; на windows пустышка
-- `lockKubeconfig()` (`clientlock.go`) - `<output>.lock` через `O_EXCL`, как client-go; чужой lock-файл не удаляется
+- `lockKubeconfig()` (`clientlock.go`) - `<output>.lock` через `O_EXCL`, как client-go (создаёт недостающий каталог); чужой lock-файл не удаляется; «занят» — только `errKubeconfigLockBusy` по таймауту
 - `CaptureStdout()` (`quiet.go`) - перехватывает вывод Composer (fmt и pterm); меняет глобальный `os.Stdout`, не потокобезопасна
 
 ### Conflict Resolution Strategy

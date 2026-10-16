@@ -351,7 +351,9 @@ func TestRunRebuildsWhenOutputDeletedOrCorrupt(t *testing.T) {
 	}
 
 	// Повреждённый файл с изменившимися источниками собирается заново.
-	if err := os.WriteFile(f.output, []byte("::: not yaml"), 0o600); err != nil {
+	// Нужен именно невалидный YAML: строку вроде "::: not yaml" client-go
+	// читает без ошибки как пустой конфиг.
+	if err := os.WriteFile(f.output, []byte("clusters: [{\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	f.source(t, "prod.yaml", "prod", "https://prod")
@@ -361,6 +363,54 @@ func TestRunRebuildsWhenOutputDeletedOrCorrupt(t *testing.T) {
 	}
 	if got := contextNames(f.load(t)); len(got) != 2 {
 		t.Errorf("контексты: %v", got)
+	}
+	if b := f.backups(t); len(b) != 1 {
+		t.Errorf("повреждённый kc.yaml должен попасть в бэкап ровно один раз, бэкапы: %v", b)
+	}
+}
+
+func TestRunDeletedOutputIsNotBackedUp(t *testing.T) {
+	f := newFixture(t)
+	f.source(t, "dev.yaml", "dev", "https://dev")
+	f.run(t)
+	if err := os.Remove(f.output); err != nil {
+		t.Fatal(err)
+	}
+	f.source(t, "prod.yaml", "prod", "https://prod")
+	f.run(t)
+	if b := f.backups(t); len(b) != 0 {
+		t.Errorf("удалённый kc.yaml сохранять нечего, бэкапы: %v", b)
+	}
+}
+
+func TestRunBacksUpUnreadableOutput(t *testing.T) {
+	f := newFixture(t)
+	f.source(t, "dev.yaml", "dev", "https://dev")
+	f.run(t)
+
+	// Ручная правка с опечаткой: файл больше не разбирается.
+	data, err := os.ReadFile(f.output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broken := append(data, []byte("\nclusters: [{\n")...)
+	if err := os.WriteFile(f.output, broken, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.source(t, "prod.yaml", "prod", "https://prod")
+	if res := f.run(t); !res.Rebuilt {
+		t.Fatal("ожидалась пересборка")
+	}
+
+	b := f.backups(t)
+	if len(b) != 1 {
+		t.Fatalf("ожидался ровно один бэкап, есть %v", b)
+	}
+	if got, _ := os.ReadFile(b[0]); !bytes.Equal(got, broken) {
+		t.Errorf("в бэкапе не прежний битый файл:\n%s", got)
+	}
+	if !strings.Contains(f.log.String(), b[0]) {
+		t.Errorf("в stderr нет пути бэкапа %s: %q", b[0], f.log)
 	}
 }
 
@@ -623,8 +673,8 @@ func TestRunBusyKubectlLockLeavesOutputAndState(t *testing.T) {
 	if err == nil || res.Rebuilt || !res.ExportOK {
 		t.Fatalf("занятый lock: ожидалась ошибка без пересборки, res=%+v err=%v", res, err)
 	}
-	if !strings.Contains(f.log.String(), lock) {
-		t.Errorf("в stderr нет пути lock-файла: %q", f.log)
+	if !strings.Contains(f.log.String(), lock) || !strings.Contains(f.log.String(), "занят") {
+		t.Errorf("в stderr нет сообщения, что lock-файл занят: %q", f.log)
 	}
 	if after, _ := os.ReadFile(f.output); !bytes.Equal(before, after) {
 		t.Error("kc.yaml изменён при занятом lock")
@@ -653,5 +703,183 @@ func TestRunRemovesKubectlLock(t *testing.T) {
 	f.run(t)
 	if _, err := os.Stat(f.output + ".lock"); !os.IsNotExist(err) {
 		t.Errorf("после Run lock-файл должен быть удалён, stat: %v", err)
+	}
+}
+
+func TestRunOutputInMissingDir(t *testing.T) {
+	f := newFixture(t)
+	f.source(t, "dev.yaml", "dev", "https://dev")
+	f.output = filepath.Join(f.root, "new", "sub", "kc.yaml")
+	f.opts.Output = f.output
+
+	res := f.run(t)
+	if !res.Rebuilt || !res.ExportOK {
+		t.Fatalf("сборка в новый каталог: %+v, log: %s", res, f.log)
+	}
+	if got := contextNames(f.load(t)); len(got) != 1 {
+		t.Errorf("контексты: %v", got)
+	}
+}
+
+func TestRunKubectlLockErrorIsNotReportedAsBusy(t *testing.T) {
+	f := newFixture(t)
+	f.source(t, "dev.yaml", "dev", "https://dev")
+	// Каталог output — обычный файл: lock-файл не создать, но он и не занят.
+	plain := filepath.Join(f.root, "plain")
+	if err := os.WriteFile(plain, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.output = filepath.Join(plain, "kc.yaml")
+	f.opts.Output = f.output
+
+	if _, err := Run(f.opts); err == nil {
+		t.Fatal("ожидалась ошибка: каталог output — файл")
+	}
+	if strings.Contains(f.log.String(), "занят") {
+		t.Errorf("ошибка создания lock-файла выдана за «занят»: %q", f.log)
+	}
+}
+
+// setBeforeWriteHook ставит beforeWriteHook на время теста; fn получает номер
+// вызова, начиная с 1. Возвращает счётчик вызовов.
+func setBeforeWriteHook(t *testing.T, fn func(call int)) *int {
+	t.Helper()
+	calls := 0
+	beforeWriteHook = func() {
+		calls++
+		fn(calls)
+	}
+	t.Cleanup(func() { beforeWriteHook = nil })
+	return &calls
+}
+
+// touch ставит kc.yaml заметно другой mtime, чтобы перепроверка точно увидела
+// чужую запись даже на файловой системе с грубым mtime.
+func (f *fixture) touch(t *testing.T, hours int) {
+	t.Helper()
+	ts := time.Now().Add(time.Duration(hours) * time.Hour)
+	if err := os.Chtimes(f.output, ts, ts); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// twoSourcesBuilt собирает kc.yaml из a и b с current-context a и добавляет
+// источник c, чтобы следующий Run пересобирал файл.
+func twoSourcesBuilt(t *testing.T) *fixture {
+	t.Helper()
+	f := newFixture(t)
+	f.source(t, "a.yaml", "a", "https://a")
+	f.source(t, "b.yaml", "b", "https://b")
+	f.run(t)
+	f.edit(t, func(cfg *clientcmdapi.Config) { cfg.CurrentContext = "kc:a:a.yaml" })
+	f.source(t, "c.yaml", "c", "https://c")
+	return f
+}
+
+func TestRunRecheckPicksUpConcurrentContextSwitch(t *testing.T) {
+	f := twoSourcesBuilt(t)
+	calls := setBeforeWriteHook(t, func(call int) {
+		if call == 1 { // kubectx b в соседнем терминале
+			f.edit(t, func(cfg *clientcmdapi.Config) { cfg.CurrentContext = "kc:b:b.yaml" })
+			f.touch(t, 1)
+		}
+	})
+
+	if res := f.run(t); !res.Rebuilt {
+		t.Fatal("ожидалась пересборка")
+	}
+	got := f.load(t)
+	if got.CurrentContext != "kc:b:b.yaml" {
+		t.Errorf("current-context = %q, переключение kubectx потеряно", got.CurrentContext)
+	}
+	if len(got.Contexts) != 3 {
+		t.Errorf("контексты: %v", contextNames(got))
+	}
+	if *calls != 2 {
+		t.Errorf("попыток %d, ожидалось 2", *calls)
+	}
+}
+
+func TestRunEmptyOutputIsTreatedAsWriteInProgress(t *testing.T) {
+	f := twoSourcesBuilt(t)
+	f.edit(t, func(cfg *clientcmdapi.Config) { cfg.CurrentContext = "kc:b:b.yaml" })
+	saved, err := os.ReadFile(f.output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// kubectx сделал truncate и ещё не дописал файл...
+	setBeforeWriteHook(t, func(call int) {
+		if call == 1 {
+			if err := os.WriteFile(f.output, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	// ...и дописал, пока init ждал.
+	slept := 0
+	retrySleep = func(time.Duration) {
+		slept++
+		if slept == 1 {
+			if err := os.WriteFile(f.output, saved, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			f.touch(t, 1)
+		}
+	}
+	t.Cleanup(func() { retrySleep = time.Sleep })
+
+	f.run(t)
+	if got := f.load(t); got.CurrentContext != "kc:b:b.yaml" {
+		t.Errorf("current-context = %q: пустой файл принят за пустую сессию", got.CurrentContext)
+	}
+	if slept == 0 {
+		t.Error("на пустом файле init должен был подождать")
+	}
+}
+
+func TestRunRetryStartsFromSourceBuild(t *testing.T) {
+	for _, tc := range []struct{ name, second, want string }{
+		{"namespace сменили", "b", "b"},
+		{"namespace сбросили", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := twoSourcesBuilt(t)
+			f.edit(t, func(cfg *clientcmdapi.Config) { cfg.Contexts["kc:a:a.yaml"].Namespace = "a" })
+			setBeforeWriteHook(t, func(call int) {
+				if call == 1 { // kubens в соседнем терминале
+					f.edit(t, func(cfg *clientcmdapi.Config) { cfg.Contexts["kc:a:a.yaml"].Namespace = tc.second })
+					f.touch(t, 1)
+				}
+			})
+
+			f.run(t)
+			if got := f.load(t).Contexts["kc:a:a.yaml"].Namespace; got != tc.want {
+				t.Errorf("namespace = %q, ожидалось %q: повтор унаследовал первую попытку", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunRecheckGivesUpAfterThreeAttempts(t *testing.T) {
+	f := twoSourcesBuilt(t)
+	calls := setBeforeWriteHook(t, func(call int) {
+		f.edit(t, func(cfg *clientcmdapi.Config) {
+			if call%2 == 1 {
+				cfg.CurrentContext = "kc:b:b.yaml"
+			} else {
+				cfg.CurrentContext = "kc:a:a.yaml"
+			}
+		})
+		f.touch(t, call)
+	})
+
+	if res := f.run(t); !res.Rebuilt {
+		t.Fatal("после исчерпания попыток файл всё равно должен быть записан")
+	}
+	if *calls != 3 {
+		t.Errorf("попыток %d, ожидалось 3", *calls)
+	}
+	if got := contextNames(f.load(t)); len(got) != 3 {
+		t.Errorf("контексты: %v", got)
 	}
 }

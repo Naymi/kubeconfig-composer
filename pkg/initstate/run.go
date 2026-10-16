@@ -1,6 +1,7 @@
 package initstate
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -154,15 +155,49 @@ type rebuildResult struct {
 	sourceNamespaces map[string]string // State.SourceNamespaces
 }
 
+// maxSessionAttempts — сколько раз rebuild переносит сессию заново, если
+// прежний output изменился, пока мы его читали и переносили.
+const maxSessionAttempts = 3
+
+// beforeWriteHook вызывается в rebuild после переноса сессии и перед
+// перепроверкой output; тесты подменяют им запись kubectx. В проде nil.
+var beforeWriteHook func()
+
+// retrySleep — пауза перед повтором, если прежний output пуст; тесты подменяют.
+var retrySleep = time.Sleep
+
+// fileStamp — что rebuild сравнивает, чтобы заметить чужую запись в output.
+type fileStamp struct {
+	exists bool
+	size   int64
+	mtime  int64 // UnixNano
+}
+
+func stampOf(path string) fileStamp {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fileStamp{}
+	}
+	return fileStamp{exists: true, size: info.Size(), mtime: info.ModTime().UnixNano()}
+}
+
 // rebuild собирает output из источников и записывает его, если содержимое
 // изменилось. prev — состояние прошлой сборки пары или nil, если его нет.
 //
 // Разбор источников идёт без блокировок: он долгий, а пока lock client-go
 // "<exported>.lock" занят, kubectl config use-context падает сразу. Под lock
-// только операции в памяти и rename: прочитать прежний output (сессию) →
-// current-context (до Dedupe) → Dedupe → запомнить namespace источников →
-// перенести namespace → бэкап, если пропадают чужие записи → запись. Так
-// kubectl не может записать файл между нашими чтением и rename.
+// только операции в памяти и rename. Попытка: stat output → прочитать прежний
+// output (сессию; нечитаемый файл сохраняется в бэкап) → current-context (до
+// Dedupe) → Dedupe → запомнить namespace источников → перенести namespace →
+// бэкап, если пропадают чужие записи → stat output ещё раз. Если файл
+// изменился, попытка повторяется заново с собранного из источников конфига,
+// но не больше maxSessionAttempts раз; затем запись. Пустой output считается
+// чужой записью в процессе (kubectx делает truncate + write): ждём и пробуем
+// снова, а на последней попытке считаем, что сессии нет.
+//
+// kubectl не может записать файл между нашими чтением и rename: он берёт тот
+// же lock. kubectx и kubens lock не берут; их запись теряется, только если
+// попала между последним stat и rename.
 func rebuild(opts Options, dir, output, exported string, prev *State, logf func(string, ...any)) (rebuildResult, error) {
 	c := composer.New(true)
 	c.SetBaseDir(dir)
@@ -179,6 +214,9 @@ func rebuild(opts Options, dir, output, exported string, prev *State, logf func(
 	if err != nil {
 		return rebuildResult{}, fmt.Errorf("не удалось собрать конфиг: %w", err)
 	}
+	// Каждая попытка начинает с этой копии, чтобы сессия прошлой попытки не
+	// осталась в результате.
+	base := c.Result().DeepCopy()
 
 	// kubectl берёт lock по пути из KUBECONFIG, то есть по exported.
 	timeout := opts.KubeconfigLockTimeout
@@ -187,42 +225,89 @@ func rebuild(opts Options, dir, output, exported string, prev *State, logf func(
 	}
 	unlock, err := lockKubeconfig(exported, timeout)
 	if err != nil {
-		logf("⚠ %s.lock занят; если kubectl не запущен, удалите его", exported)
+		if errors.Is(err, errKubeconfigLockBusy) {
+			logf("⚠ %s.lock занят; если kubectl не запущен, удалите его", exported)
+		}
 		return rebuildResult{}, err
 	}
 	defer unlock()
 
-	sess, serr := ReadSession(output)
-	if serr != nil {
-		logf("⚠ не удалось прочитать прежний %s, состояние сессии не сохранено: %v", output, serr)
-		sess = nil
+	var prevSource map[string]string
+	var owned map[string]bool
+	if prev != nil {
+		prevSource = prev.SourceNamespaces
+		owned = prev.owned()
 	}
+	backupDir := filepath.Join(opts.StateDir, "backups")
 
-	// current-context ставим до Dedupe: он не схлопывает контекст из current-context.
-	if sess != nil {
-		sess.ApplyCurrentContext(c.Result())
-	}
-	c.Dedupe()
-	sourceNamespaces := contextNamespaces(c.Result())
-	if sess != nil {
-		var prevSource map[string]string
-		var owned map[string]bool
-		if prev != nil {
-			prevSource = prev.SourceNamespaces
-			owned = prev.owned()
+	var (
+		unreadableSaved  bool // нечитаемый output уже сохранён в этой пересборке
+		lostSaved        bool // output с пропадающими чужими записями уже сохранён
+		lostBackup       string
+		lostBackupErr    error
+		lost             []string
+		sourceNamespaces map[string]string
+	)
+	for attempt := 1; ; attempt++ {
+		last := attempt == maxSessionAttempts
+		*c.Result() = *base.DeepCopy()
+
+		before := stampOf(output)
+		empty := before.exists && before.size == 0
+		if empty && !last {
+			retrySleep(10 * time.Millisecond)
+			continue
 		}
-		sess.ApplyNamespaces(c.Result(), prevSource)
 
-		// Пропадает то, что init на прошлой сборке не записывал (или состояния
-		// нет вовсе, и файл собирал не init): сохраняем прежний файл.
-		if lost := sess.LostForeign(c.Result(), owned); len(lost) > 0 {
-			list := formatLost(lost)
-			backup, berr := backupFile(output, filepath.Join(opts.StateDir, "backups"))
-			if berr != nil {
-				logf("⚠ в новом %s нет записей, которых нет среди источников: %s; сохранить прежний файл не удалось: %v", output, list, berr)
-			} else {
-				logf("⚠ в новом %s нет записей, которых нет среди источников: %s; прежний файл сохранён: %s", output, list, backup)
+		var sess *Session
+		if !empty {
+			var serr error
+			if sess, serr = ReadSession(output); serr != nil {
+				sess = nil
+				if !unreadableSaved {
+					unreadableSaved = true
+					backup, berr := backupFile(output, backupDir)
+					if berr != nil {
+						logf("⚠ не удалось прочитать прежний %s: %v; сохранить прежний файл не удалось: %v", output, serr, berr)
+					} else {
+						logf("⚠ не удалось прочитать прежний %s: %v; прежний файл сохранён: %s", output, serr, backup)
+					}
+				}
 			}
+		}
+
+		// current-context ставим до Dedupe: он не схлопывает контекст из current-context.
+		if sess != nil {
+			sess.ApplyCurrentContext(c.Result())
+		}
+		c.Dedupe()
+		sourceNamespaces = contextNamespaces(c.Result())
+		lost = nil
+		if sess != nil {
+			sess.ApplyNamespaces(c.Result(), prevSource)
+			// Пропадает то, что init на прошлой сборке не записывал (или
+			// состояния нет вовсе, и файл собирал не init): сохраняем прежний файл.
+			lost = sess.LostForeign(c.Result(), owned)
+			if len(lost) > 0 && !lostSaved {
+				lostSaved = true
+				lostBackup, lostBackupErr = backupFile(output, backupDir)
+			}
+		}
+
+		if beforeWriteHook != nil {
+			beforeWriteHook()
+		}
+		if last || stampOf(output) == before {
+			break
+		}
+	}
+
+	if len(lost) > 0 {
+		list := formatLost(lost)
+		if lostBackupErr != nil {
+			logf("⚠ в новом %s нет записей, которых нет среди источников: %s; сохранить прежний файл не удалось: %v", output, list, lostBackupErr)
+		} else {
+			logf("⚠ в новом %s нет записей, которых нет среди источников: %s; прежний файл сохранён: %s", output, list, lostBackup)
 		}
 	}
 

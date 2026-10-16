@@ -1,6 +1,7 @@
 package initstate
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -44,13 +45,37 @@ func TestLockKubeconfigTimesOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Now()
-	if _, err := lockKubeconfig(path, 50*time.Millisecond); err == nil {
-		t.Fatal("занятый lock должен дать ошибку по таймауту")
+	_, err := lockKubeconfig(path, 50*time.Millisecond)
+	if !errors.Is(err, errKubeconfigLockBusy) {
+		t.Fatalf("занятый lock должен дать errKubeconfigLockBusy по таймауту, получено %v", err)
 	}
 	if time.Since(start) > 2*time.Second {
 		t.Error("таймаут не соблюдён")
 	}
 	if _, err := os.Stat(path + ".lock"); err != nil {
 		t.Errorf("чужой lock-файл нельзя удалять: %v", err)
+	}
+}
+
+func TestLockKubeconfigCreatesMissingDir(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "new", "sub", "kc.yaml")
+	unlock, err := lockKubeconfig(path, time.Second)
+	if err != nil {
+		t.Fatalf("каталога ещё нет — его нужно создать: %v", err)
+	}
+	defer unlock()
+	if _, err := os.Stat(path + ".lock"); err != nil {
+		t.Fatalf("lock-файл не создан: %v", err)
+	}
+}
+
+func TestLockKubeconfigOtherErrorIsNotBusy(t *testing.T) {
+	plain := filepath.Join(t.TempDir(), "plain")
+	if err := os.WriteFile(plain, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := lockKubeconfig(filepath.Join(plain, "kc.yaml"), time.Second)
+	if err == nil || errors.Is(err, errKubeconfigLockBusy) {
+		t.Fatalf("каталог — файл: ожидалась ошибка, отличная от «занят», получено %v", err)
 	}
 }
